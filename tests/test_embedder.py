@@ -11,7 +11,7 @@ from unittest.mock import MagicMock, patch
 import numpy as np
 import pytest
 
-from src import embedder
+from src import embedder, utils
 
 
 # ---------------------------------------------------------------------------
@@ -78,7 +78,7 @@ def test_all_cache_hit_skips_api(tmp_path: Path) -> None:
 
     # Pre-populate the cache
     cache = {
-        embedder._hash_key(t): np.full(dim, i + 1, dtype=np.float32)
+        utils.content_hash(t): np.full(dim, i + 1, dtype=np.float32)
         for i, t in enumerate(texts)
     }
     cache_path = cache_dir / f"embeddings_{model}.pkl"
@@ -86,7 +86,7 @@ def test_all_cache_hit_skips_api(tmp_path: Path) -> None:
         pickle.dump(cache, f)
 
     fake_client = _CountingFakeClient(dim=dim)
-    with patch.object(embedder, "_make_client", return_value=fake_client):
+    with patch.object(embedder, "_make_openai_client", return_value=fake_client):
         result = embedder.get_embeddings(texts, cache_dir=cache_dir, model=model)
 
     # API は呼ばれない
@@ -104,7 +104,7 @@ def test_all_cache_miss_calls_api_and_saves_cache(tmp_path: Path) -> None:
     cache_dir = tmp_path / "cache"
 
     fake_client = _CountingFakeClient(dim=6)
-    with patch.object(embedder, "_make_client", return_value=fake_client):
+    with patch.object(embedder, "_make_openai_client", return_value=fake_client):
         result = embedder.get_embeddings(texts, cache_dir=cache_dir, model=model)
 
     # API が呼ばれて全件取得している
@@ -120,7 +120,7 @@ def test_all_cache_miss_calls_api_and_saves_cache(tmp_path: Path) -> None:
         saved = pickle.load(f)
     assert len(saved) == 3
     for text in texts:
-        assert embedder._hash_key(text) in saved
+        assert utils.content_hash(text) in saved
 
     # Return shape
     assert result.shape == (3, 6)
@@ -138,7 +138,7 @@ def test_partial_cache_only_queries_missing(tmp_path: Path) -> None:
 
     # A, B だけ事前キャッシュ
     initial = {
-        embedder._hash_key(t): np.full(dim, i, dtype=np.float32)
+        utils.content_hash(t): np.full(dim, i, dtype=np.float32)
         for i, t in enumerate(cached_texts)
     }
     cache_path = cache_dir / f"embeddings_{model}.pkl"
@@ -146,7 +146,7 @@ def test_partial_cache_only_queries_missing(tmp_path: Path) -> None:
         pickle.dump(initial, f)
 
     fake_client = _CountingFakeClient(dim=dim)
-    with patch.object(embedder, "_make_client", return_value=fake_client):
+    with patch.object(embedder, "_make_openai_client", return_value=fake_client):
         result = embedder.get_embeddings(all_texts, cache_dir=cache_dir, model=model)
 
     # 送られたテキストは C, D のみ
@@ -168,7 +168,7 @@ def test_result_order_preserved_across_parallel_batches(tmp_path: Path) -> None:
     cache_dir = tmp_path / "cache"
     fake_client = _CountingFakeClient(dim=4)
 
-    with patch.object(embedder, "_make_client", return_value=fake_client):
+    with patch.object(embedder, "_make_openai_client", return_value=fake_client):
         result = embedder.get_embeddings(texts, cache_dir=cache_dir, model=model)
 
     # 少なくとも 2 バッチ（並列動作時は順不同で完了しうる）
@@ -207,7 +207,7 @@ def test_corrupted_cache_is_discarded(tmp_path: Path) -> None:
     cache_path.write_bytes(b"not a valid pickle")
 
     fake_client = _CountingFakeClient(dim=3)
-    with patch.object(embedder, "_make_client", return_value=fake_client):
+    with patch.object(embedder, "_make_openai_client", return_value=fake_client):
         result = embedder.get_embeddings(["hello"], cache_dir=cache_dir, model=model)
 
     assert result.shape == (1, 3)
@@ -215,7 +215,7 @@ def test_corrupted_cache_is_discarded(tmp_path: Path) -> None:
     with cache_path.open("rb") as f:
         loaded = pickle.load(f)
     assert isinstance(loaded, dict)
-    assert embedder._hash_key("hello") in loaded
+    assert utils.content_hash("hello") in loaded
 
 
 def test_rate_limit_triggers_retry(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -244,7 +244,7 @@ def test_rate_limit_triggers_retry(tmp_path: Path, monkeypatch: pytest.MonkeyPat
     # Shorten backoff to keep the test fast
     monkeypatch.setattr(embedder, "BACKOFF_BASE_SEC", 0.01)
 
-    with patch.object(embedder, "_make_client", return_value=_FlakeyClient()):
+    with patch.object(embedder, "_make_openai_client", return_value=_FlakeyClient()):
         result = embedder.get_embeddings(
             ["a"], cache_dir=tmp_path / "cache", model="retry"
         )

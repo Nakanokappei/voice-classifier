@@ -89,7 +89,7 @@ def test_generate_annotations_calls_chat_for_each_cluster(tmp_path: Path) -> Non
     ]
 
     fake_client = _CountingChatClient()
-    with patch.object(namer, "_make_client", return_value=fake_client):
+    with patch.object(namer, "_make_openai_client", return_value=fake_client):
         result = namer.generate_cluster_annotations(
             summaries, cache_dir=tmp_path / "cache", model="test-model"
         )
@@ -110,7 +110,7 @@ def test_cache_hit_skips_api(tmp_path: Path) -> None:
     cache_dir = tmp_path / "cache"
 
     fake_client = _CountingChatClient()
-    with patch.object(namer, "_make_client", return_value=fake_client):
+    with patch.object(namer, "_make_openai_client", return_value=fake_client):
         namer.generate_cluster_annotations(summaries, cache_dir=cache_dir, model="m")
         namer.generate_cluster_annotations(summaries, cache_dir=cache_dir, model="m")
 
@@ -121,7 +121,7 @@ def test_generate_cluster_names_wraps_annotations(tmp_path: Path) -> None:
     """Backwards-compat wrapper returns label-only dict."""
     summaries = [_make_summary(0, ["テキスト"])]
     fake_client = _CountingChatClient()
-    with patch.object(namer, "_make_client", return_value=fake_client):
+    with patch.object(namer, "_make_openai_client", return_value=fake_client):
         names = namer.generate_cluster_names(
             summaries, cache_dir=tmp_path / "c", model="m"
         )
@@ -134,7 +134,7 @@ def test_empty_representatives_fallback(tmp_path: Path) -> None:
     """Clusters with no representatives fall back without an API call."""
     summaries = [_make_summary(5, [])]
     fake_client = _CountingChatClient()
-    with patch.object(namer, "_make_client", return_value=fake_client):
+    with patch.object(namer, "_make_openai_client", return_value=fake_client):
         result = namer.generate_cluster_annotations(
             summaries, cache_dir=tmp_path / "c", model="m"
         )
@@ -174,7 +174,7 @@ def test_failure_falls_back_to_default(tmp_path: Path) -> None:
             raise RuntimeError("API dead")
 
     summaries = [_make_summary(7, ["text"])]
-    with patch.object(namer, "_make_client", return_value=_AlwaysFailClient()):
+    with patch.object(namer, "_make_openai_client", return_value=_AlwaysFailClient()):
         result = namer.generate_cluster_annotations(
             summaries, cache_dir=tmp_path / "c", model="m"
         )
@@ -188,7 +188,7 @@ def test_cache_file_also_saves_json(tmp_path: Path) -> None:
     cache_dir = tmp_path / "cache"
 
     fake_client = _CountingChatClient()
-    with patch.object(namer, "_make_client", return_value=fake_client):
+    with patch.object(namer, "_make_openai_client", return_value=fake_client):
         namer.generate_cluster_annotations(summaries, cache_dir=cache_dir, model="m")
 
     pickle_path = cache_dir / "cluster_annotations_v3_m.pkl"
@@ -242,7 +242,7 @@ def test_infer_dataset_context_samples_and_parses(tmp_path: Path) -> None:
         "領収書の再発行依頼",
     ]
     client = _ContextClient(domain="Consumer electronics repair intake", hint="Break down by symptom")
-    with patch.object(namer, "_make_client", return_value=client):
+    with patch.object(namer, "_make_openai_client", return_value=client):
         context = namer.infer_dataset_context(texts, sample_size=3)
 
     assert client.call_count == 1
@@ -256,7 +256,7 @@ def test_infer_dataset_context_samples_and_parses(tmp_path: Path) -> None:
 
 def test_infer_dataset_context_empty_returns_fallback() -> None:
     """Empty input returns a fallback without calling the API."""
-    with patch.object(namer, "_make_client") as mock_client:
+    with patch.object(namer, "_make_openai_client") as mock_client:
         context = namer.infer_dataset_context([])
     mock_client.assert_not_called()
     assert context.domain == "unknown"
@@ -310,7 +310,7 @@ def test_resolve_duplicates_keeps_larger_relabels_smaller() -> None:
     }
 
     client = _DifferentiatingClient()
-    with patch.object(namer, "_make_client", return_value=client):
+    with patch.object(namer, "_make_openai_client", return_value=client):
         resolved = namer.resolve_label_duplicates(
             summaries=summaries, annotations=annotations,
         )
@@ -389,7 +389,7 @@ def test_resolve_duplicates_noop_when_all_unique() -> None:
         0: namer.ClusterAnnotation(label="A", summary="A"),
         1: namer.ClusterAnnotation(label="B", summary="B"),
     }
-    with patch.object(namer, "_make_client") as mock_client:
+    with patch.object(namer, "_make_openai_client") as mock_client:
         resolved = namer.resolve_label_duplicates(
             summaries=summaries, annotations=annotations,
         )

@@ -10,20 +10,22 @@ Responsibilities:
     - L2-normalise the embedding matrix; optionally reduce dimensionality via PCA.
     - Run MiniBatchKMeans / DBSCAN / HDBSCAN over the sample.
     - Compute silhouette score (cosine) for each candidate.
-    - Return the winning configuration as `BestConfig`, with labels for every row.
+    - Return the winning configuration as ``BestConfig``, with labels for every row.
 """
 
 from __future__ import annotations
 
 import logging
 from dataclasses import dataclass, field
-from typing import Any, Literal
+from typing import Any, Callable, Literal
 
 import numpy as np
 from sklearn.cluster import DBSCAN, MiniBatchKMeans
 from sklearn.decomposition import PCA
 from sklearn.metrics import silhouette_score
 from tqdm import tqdm
+
+from . import utils
 
 logger = logging.getLogger(__name__)
 
@@ -53,11 +55,11 @@ PCA_DIM_THRESHOLD: int = 50
 # K candidate set (inherits CKPS's grid; keeps small K too for tiny datasets).
 K_CANDIDATES: tuple[int, ...] = (2, 3, 5, 7, 10, 15, 20, 30, 50, 80)
 
-# HDBSCAN `min_cluster_size` candidates (matches CKPS).
+# HDBSCAN ``min_cluster_size`` candidates (matches CKPS).
 HDBSCAN_MCS_CANDIDATES: tuple[int, ...] = (5, 10, 15, 20, 30, 50, 80, 100)
 HDBSCAN_MIN_SAMPLES: int = 5
 
-# DBSCAN `eps` grid on the L2-normalised euclidean scale.
+# DBSCAN ``eps`` grid on the L2-normalised euclidean scale.
 # After normalisation: euclidean² = 2 * (1 - cos_sim). Example: cos_sim=0.75 -> eps ≈ 0.707.
 DBSCAN_EPS_GRID: tuple[float, ...] = (0.25, 0.35, 0.45, 0.55, 0.70)
 DBSCAN_MIN_SAMPLES: int = 5
@@ -88,7 +90,7 @@ class BestConfig:
         n_noise: number of noise points
         all_trials: score log for every swept candidate (pre-filter)
         sweep_sample_size: points used during the sweep (for noise ratio reporting)
-        dim_before_pca: dimension before PCA; equals `dim_after_pca` when PCA skipped
+        dim_before_pca: dimension before PCA; equals ``dim_after_pca`` when PCA skipped
         dim_after_pca: dimension after PCA
     """
 
@@ -118,6 +120,11 @@ class BestConfig:
         return MAX_NOISE_RATIO_FOR_SELECTION
 
 
+# ---------------------------------------------------------------------------
+# Top-level entry point
+# ---------------------------------------------------------------------------
+
+
 def find_best_clustering(
     embeddings: np.ndarray,
     min_clusters: int = 2,
@@ -125,19 +132,8 @@ def find_best_clustering(
 ) -> BestConfig:
     """Search for the best clustering configuration over the embedding matrix.
 
-    Phase 1: sweep every candidate on a `SWEEP_SAMPLE_SIZE` subsample and score it.
+    Phase 1: sweep every candidate on a ``SWEEP_SAMPLE_SIZE`` subsample and score it.
     Phase 2: re-run the winning (algorithm, params) on the full data to label it.
-
-    Args:
-        embeddings: shape (N, D) embedding matrix
-        min_clusters: lower bound of K during sweep filtering
-        max_clusters: upper bound of K during sweep filtering
-
-    Returns:
-        BestConfig
-
-    Raises:
-        ValueError: if the sample count is below `min_clusters`
     """
     n_samples = embeddings.shape[0]
     if n_samples < max(2, min_clusters):
@@ -147,16 +143,14 @@ def find_best_clustering(
         )
 
     # L2-normalise so euclidean distance is monotonic with cosine distance.
-    normalized = _l2_normalize(embeddings)
+    normalized = utils.l2_normalize(embeddings)
 
     # Curse-of-dimensionality mitigation: project to ~30 PCA dims and renormalise.
     # The same PCA model is reused across phase1 and phase2.
     reduced, pca_model = _reduce_dimensions(normalized)
     logger.info(
         "tuner: dim %d -> %d (pca=%s)",
-        embeddings.shape[1],
-        reduced.shape[1],
-        pca_model is not None,
+        embeddings.shape[1], reduced.shape[1], pca_model is not None,
     )
 
     # Phase 1: sampling -> sweep.
@@ -164,72 +158,40 @@ def find_best_clustering(
     sample = reduced[sample_indices]
     logger.info(
         "tuner: phase1 sweep on %d / %d points (hdbscan=%s)",
-        sample.shape[0],
-        n_samples,
-        _HDBSCAN_AVAILABLE,
+        sample.shape[0], n_samples, _HDBSCAN_AVAILABLE,
     )
 
-    trials: list[dict[str, Any]] = []
-    trials.extend(_sweep_kmeans(sample, min_clusters, max_clusters))
-    trials.extend(_sweep_dbscan(sample))
-    if _HDBSCAN_AVAILABLE:
-        trials.extend(_sweep_hdbscan(sample))
+    trials = _run_all_sweeps(sample, min_clusters, max_clusters)
 
-    # Filter candidates:
-    # 1. Silhouette must be computable (not None, not -1).
-    # 2. Noise ratio must be within the usability threshold.
-    valid = [
-        t for t in trials
-        if t["silhouette"] is not None
-        and t["silhouette"] > -1.0
-        and (t["n_noise"] / sample.shape[0]) <= MAX_NOISE_RATIO_FOR_SELECTION
-    ]
-    if not valid:
-        # Relax the filter and try again; emit a warning so the issue is visible.
-        logger.warning(
-            "All candidates have noise ratio > %.0f%%. Relaxing the filter.",
-            MAX_NOISE_RATIO_FOR_SELECTION * 100,
-        )
-        valid = [t for t in trials if t["silhouette"] is not None and t["silhouette"] > -1.0]
-    if not valid:
-        raise RuntimeError("No valid clustering candidate was produced")
-
-    winner = max(valid, key=lambda t: t["silhouette"])
+    winner = _select_winner(trials, sample_size=sample.shape[0])
     logger.info(
         "phase1 winner: %s params=%s sample_score=%.4f",
-        winner["algorithm"],
-        winner["params"],
-        winner["silhouette"],
+        winner["algorithm"], winner["params"], winner["silhouette"],
     )
 
     # Phase 2: apply the winning config to the full (PCA-reduced) data.
     logger.info("phase2: apply winner to full data (N=%d)", n_samples)
-    final_labels = _apply_to_full(
+    final_labels = _fit_winner_on_full_data(
         normalized=reduced,
-        sample=sample,
+        sample_size=sample.shape[0],
         sample_labels=winner["sample_labels"],
-        sample_indices=sample_indices,
         algorithm=winner["algorithm"],
         params=winner["params"],
     )
 
     n_clusters, n_noise = _count_clusters(final_labels)
-    final_score = _evaluate_silhouette(
+    final_score = _evaluate_silhouette_on_subsample(
         normalized=reduced,
         labels=final_labels,
         max_points=SWEEP_SAMPLE_SIZE,
     )
     if final_score is None:
-        # If the full-data run collapses to a single cluster, score stays very low.
+        # Collapses to a single cluster → score unusable; mark as -inf.
         final_score = float("-inf")
 
     logger.info(
         "Selected: %s params=%s final_score=%.4f clusters=%d noise=%d",
-        winner["algorithm"],
-        winner["params"],
-        final_score,
-        n_clusters,
-        n_noise,
+        winner["algorithm"], winner["params"], final_score, n_clusters, n_noise,
     )
 
     return BestConfig(
@@ -246,9 +208,91 @@ def find_best_clustering(
     )
 
 
+def _run_all_sweeps(
+    sample: np.ndarray, min_clusters: int, max_clusters: int
+) -> list[dict[str, Any]]:
+    """Run KMeans / DBSCAN / (optional) HDBSCAN sweeps, returning one flat trial list."""
+    trials: list[dict[str, Any]] = []
+    trials.extend(_sweep_kmeans(sample, min_clusters, max_clusters))
+    trials.extend(_sweep_dbscan(sample))
+    if _HDBSCAN_AVAILABLE:
+        trials.extend(_sweep_hdbscan(sample))
+    return trials
+
+
+def _select_winner(
+    trials: list[dict[str, Any]],
+    sample_size: int,
+) -> dict[str, Any]:
+    """Apply the usability filter and pick the highest-scoring candidate.
+
+    If every candidate trips the noise-ratio filter, log a warning and fall
+    back to scoring alone so the pipeline still produces output.
+    """
+    def _has_score(t: dict[str, Any]) -> bool:
+        return t["silhouette"] is not None and t["silhouette"] > -1.0
+
+    within_noise_budget = [
+        t for t in trials
+        if _has_score(t) and (t["n_noise"] / sample_size) <= MAX_NOISE_RATIO_FOR_SELECTION
+    ]
+    if within_noise_budget:
+        return max(within_noise_budget, key=lambda t: t["silhouette"])
+
+    logger.warning(
+        "All candidates have noise ratio > %.0f%%. Relaxing the filter.",
+        MAX_NOISE_RATIO_FOR_SELECTION * 100,
+    )
+    fallback = [t for t in trials if _has_score(t)]
+    if not fallback:
+        raise RuntimeError("No valid clustering candidate was produced")
+    return max(fallback, key=lambda t: t["silhouette"])
+
+
 # ---------------------------------------------------------------------------
-# Sweep: evaluate each method over the sample
+# Sweep helpers (each wraps a method-specific model factory in a common loop)
 # ---------------------------------------------------------------------------
+
+
+def _run_sweep(
+    *,
+    sample: np.ndarray,
+    algorithm: Algorithm,
+    candidates: list[Any],
+    build_model: Callable[[Any], Any],
+    params_of: Callable[[Any], dict[str, Any]],
+    desc: str,
+    unit: str,
+) -> list[dict[str, Any]]:
+    """Generic sweep loop shared by all three algorithms.
+
+    For each candidate, instantiate the model, fit+predict on the sample,
+    and record a uniformly-shaped trial dict.
+    """
+    trials: list[dict[str, Any]] = []
+    for candidate in tqdm(candidates, desc=desc, unit=unit, leave=False):
+        model = build_model(candidate)
+        labels = model.fit_predict(sample)
+        trials.append(_build_trial(algorithm, params_of(candidate), labels, sample))
+    return trials
+
+
+def _build_trial(
+    algorithm: Algorithm,
+    params: dict[str, Any],
+    labels: np.ndarray,
+    sample: np.ndarray,
+) -> dict[str, Any]:
+    """Assemble the standard trial dict consumed by the selector and reporter."""
+    n_clusters, n_noise = _count_clusters(labels)
+    return {
+        "algorithm": algorithm,
+        "params": params,
+        "sample_labels": labels,
+        "silhouette": _silhouette_on_sample(sample, labels),
+        "n_clusters": n_clusters,
+        "n_noise": n_noise,
+    }
 
 
 def _sweep_kmeans(
@@ -256,99 +300,80 @@ def _sweep_kmeans(
 ) -> list[dict[str, Any]]:
     """Sweep MiniBatchKMeans over the K candidate set."""
     n = sample.shape[0]
-    candidates = [
-        k for k in K_CANDIDATES if max(2, min_k) <= k <= min(max_k, n - 1)
-    ]
+    candidates = [k for k in K_CANDIDATES if max(2, min_k) <= k <= min(max_k, n - 1)]
     if not candidates:
         candidates = [min(max(2, min_k), n - 1)]
 
-    trials: list[dict[str, Any]] = []
-    for k in tqdm(candidates, desc="KMeans sweep", unit="K", leave=False):
-        model = MiniBatchKMeans(
+    def _build(k: int) -> MiniBatchKMeans:
+        return MiniBatchKMeans(
             n_clusters=k,
             random_state=RANDOM_STATE,
             n_init=3,
             batch_size=min(512, max(128, n // 4)),
             max_iter=100,
         )
-        labels = model.fit_predict(sample)
-        score = _silhouette_on_sample(sample, labels)
-        trials.append(
-            {
-                "algorithm": "kmeans",
-                "params": {"k": k},
-                "sample_labels": labels,
-                "silhouette": score,
-                "n_clusters": len(set(labels) - {-1}),
-                "n_noise": int((labels == -1).sum()),
-            }
-        )
-        logger.debug("sweep kmeans k=%d score=%s", k, score)
-    return trials
+
+    return _run_sweep(
+        sample=sample,
+        algorithm="kmeans",
+        candidates=candidates,
+        build_model=_build,
+        params_of=lambda k: {"k": k},
+        desc="KMeans sweep",
+        unit="K",
+    )
 
 
 def _sweep_dbscan(sample: np.ndarray) -> list[dict[str, Any]]:
-    """Sweep DBSCAN over the `eps` grid."""
-    trials: list[dict[str, Any]] = []
-    for eps in tqdm(DBSCAN_EPS_GRID, desc="DBSCAN sweep", unit="eps", leave=False):
-        model = DBSCAN(
+    """Sweep DBSCAN over the ``eps`` grid."""
+
+    def _build(eps: float) -> DBSCAN:
+        return DBSCAN(
             eps=float(eps),
             min_samples=DBSCAN_MIN_SAMPLES,
             # Euclidean is fine because the input is already L2-normalised.
             metric="euclidean",
             n_jobs=-1,
         )
-        labels = model.fit_predict(sample)
-        score = _silhouette_on_sample(sample, labels)
-        trials.append(
-            {
-                "algorithm": "dbscan",
-                "params": {
-                    "eps": float(eps),
-                    "min_samples": DBSCAN_MIN_SAMPLES,
-                },
-                "sample_labels": labels,
-                "silhouette": score,
-                "n_clusters": len(set(labels) - {-1}),
-                "n_noise": int((labels == -1).sum()),
-            }
-        )
-        logger.debug("sweep dbscan eps=%.2f score=%s", eps, score)
-    return trials
+
+    return _run_sweep(
+        sample=sample,
+        algorithm="dbscan",
+        candidates=list(DBSCAN_EPS_GRID),
+        build_model=_build,
+        params_of=lambda eps: {"eps": float(eps), "min_samples": DBSCAN_MIN_SAMPLES},
+        desc="DBSCAN sweep",
+        unit="eps",
+    )
 
 
 def _sweep_hdbscan(sample: np.ndarray) -> list[dict[str, Any]]:
-    """Sweep HDBSCAN over the `min_cluster_size` candidate set."""
-    trials: list[dict[str, Any]] = []
+    """Sweep HDBSCAN over the ``min_cluster_size`` candidate set."""
     n = sample.shape[0]
     candidates = [m for m in HDBSCAN_MCS_CANDIDATES if m < n]
     if not candidates:
         candidates = [max(2, n // 4)]
 
-    for mcs in tqdm(candidates, desc="HDBSCAN sweep", unit="mcs", leave=False):
-        model = hdbscan.HDBSCAN(
+    def _build(mcs: int) -> "hdbscan.HDBSCAN":
+        return hdbscan.HDBSCAN(
             min_cluster_size=mcs,
             min_samples=HDBSCAN_MIN_SAMPLES,
             metric="euclidean",
             core_dist_n_jobs=-1,
         )
-        labels = model.fit_predict(sample)
-        score = _silhouette_on_sample(sample, labels)
-        trials.append(
-            {
-                "algorithm": "hdbscan",
-                "params": {
-                    "min_cluster_size": mcs,
-                    "min_samples": HDBSCAN_MIN_SAMPLES,
-                },
-                "sample_labels": labels,
-                "silhouette": score,
-                "n_clusters": len(set(labels) - {-1}),
-                "n_noise": int((labels == -1).sum()),
-            }
-        )
-        logger.debug("sweep hdbscan mcs=%d score=%s", mcs, score)
-    return trials
+
+    return _run_sweep(
+        sample=sample,
+        algorithm="hdbscan",
+        candidates=candidates,
+        build_model=_build,
+        params_of=lambda mcs: {
+            "min_cluster_size": mcs,
+            "min_samples": HDBSCAN_MIN_SAMPLES,
+        },
+        desc="HDBSCAN sweep",
+        unit="mcs",
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -356,26 +381,21 @@ def _sweep_hdbscan(sample: np.ndarray) -> list[dict[str, Any]]:
 # ---------------------------------------------------------------------------
 
 
-def _apply_to_full(
+def _fit_winner_on_full_data(
     normalized: np.ndarray,
-    sample: np.ndarray,
+    sample_size: int,
     sample_labels: np.ndarray,
-    sample_indices: np.ndarray,
     algorithm: Algorithm,
     params: dict[str, Any],
 ) -> np.ndarray:
     """Run the winning config on the full data and return labels.
 
-    We always refit (no nearest-neighbour label propagation) because propagation
+    Always refit rather than propagating labels from the sample. Propagation
     from a 1.5k sample to 8k+ points tends to classify 80-90% of rows as noise
     when the sample doesn't span the full manifold.
-
-    - KMeans: refit MiniBatchKMeans and predict.
-    - DBSCAN: euclidean with ball_tree, n_jobs=-1.
-    - HDBSCAN: core_dist_n_jobs=-1 with euclidean.
     """
-    if normalized.shape[0] == sample.shape[0]:
-        # Already fit on the entire dataset; just return the sample labels.
+    if normalized.shape[0] == sample_size:
+        # Sample equals the whole dataset — nothing to refit.
         return sample_labels.astype(np.int64)
 
     logger.info("phase2 running %s on full N=%d", algorithm, normalized.shape[0])
@@ -416,36 +436,15 @@ def _apply_to_full(
 # ---------------------------------------------------------------------------
 
 
-def _l2_normalize(x: np.ndarray) -> np.ndarray:
-    """Normalise each row to unit L2 length.
-
-    Zero-norm rows are replaced by the canonical basis vector `e_0`. Leaving them
-    as zeros would trigger divide-by-zero warnings downstream in
-    silhouette_score / cosine_distances. Substituting a deterministic unit
-    vector keeps distance math well-defined and eliminates the warning spam.
-    """
-    norms = np.linalg.norm(x, axis=1, keepdims=True)
-    zero_mask = norms.flatten() == 0
-    if zero_mask.any():
-        logger.warning(
-            "Replacing %d zero-norm rows with the canonical basis e_0",
-            int(zero_mask.sum()),
-        )
-        x = x.copy()
-        x[zero_mask, 0] = 1.0
-        norms = np.linalg.norm(x, axis=1, keepdims=True)
-    return x / norms
-
-
 def _reduce_dimensions(
     x: np.ndarray,
     target_dim: int = PCA_TARGET_DIM,
     threshold: int = PCA_DIM_THRESHOLD,
 ) -> tuple[np.ndarray, PCA | None]:
-    """PCA to `target_dim` components, then re-normalise to unit length.
+    """PCA to ``target_dim`` components, then re-normalise to unit length.
 
-    Returns (reduced_array, fitted_pca_or_None). PCA is skipped when the input
-    dimensionality is at or below `threshold`.
+    Returns ``(reduced_array, fitted_pca_or_None)``. PCA is skipped when the
+    input dimensionality is at or below ``threshold``.
     """
     n, dim = x.shape
     if dim <= threshold:
@@ -454,7 +453,7 @@ def _reduce_dimensions(
     pca = PCA(n_components=n_components, random_state=RANDOM_STATE)
     reduced = pca.fit_transform(x)
     # Re-normalise after projection to keep cosine equivalence.
-    reduced = _l2_normalize(reduced)
+    reduced = utils.l2_normalize(reduced)
     return reduced.astype(np.float32, copy=False), pca
 
 
@@ -467,9 +466,9 @@ def _sample_indices(n: int, cap: int, seed: int) -> np.ndarray:
 
 
 def _silhouette_on_sample(sample: np.ndarray, labels: np.ndarray) -> float | None:
-    """Compute cosine silhouette on the full sample.
+    """Compute cosine silhouette on the whole sample (noise excluded).
 
-    Returns None when noise is excluded and fewer than 2 valid clusters remain.
+    Returns ``None`` when fewer than 2 valid clusters remain after dropping noise.
     """
     mask = labels != -1
     if mask.sum() < 2:
@@ -486,10 +485,10 @@ def _silhouette_on_sample(sample: np.ndarray, labels: np.ndarray) -> float | Non
         return None
 
 
-def _evaluate_silhouette(
+def _evaluate_silhouette_on_subsample(
     normalized: np.ndarray, labels: np.ndarray, max_points: int
 ) -> float | None:
-    """Evaluate silhouette on at most `max_points` random rows."""
+    """Evaluate silhouette on at most ``max_points`` rows (random subsample)."""
     n = normalized.shape[0]
     if n <= max_points:
         return _silhouette_on_sample(normalized, labels)
@@ -500,7 +499,7 @@ def _evaluate_silhouette(
 
 
 def _count_clusters(labels: np.ndarray) -> tuple[int, int]:
-    """Return (number_of_valid_clusters, noise_count)."""
+    """Return ``(number_of_valid_clusters, noise_count)``."""
     unique = set(labels.tolist())
     n_noise = int((labels == -1).sum())
     n_clusters = len(unique - {-1})
@@ -508,7 +507,7 @@ def _count_clusters(labels: np.ndarray) -> tuple[int, int]:
 
 
 def _trial_log(trial: dict[str, Any]) -> dict[str, Any]:
-    """Compact dict suitable for `all_trials` (drops heavy fields like sample_labels)."""
+    """Compact dict suitable for ``all_trials`` (drops heavy fields like sample_labels)."""
     return {
         "algorithm": trial["algorithm"],
         "params": trial["params"],

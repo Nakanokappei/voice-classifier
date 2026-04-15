@@ -26,21 +26,19 @@ Caching notes:
 
 from __future__ import annotations
 
-import hashlib
 import json
 import logging
 import os
-import pickle
 import threading
-import time
 from collections import Counter, defaultdict
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from openai import APIError, OpenAI, RateLimitError
+from openai import OpenAI
 from tqdm import tqdm
 
+from . import utils
 from .clusterer import ClusterSummary, NOISE_LABEL
 
 logger = logging.getLogger(__name__)
@@ -62,7 +60,7 @@ DATASET_SAMPLE_SIZE: int = 5
 
 
 # ---------------------------------------------------------------------------
-# Model-specific API adapters
+# Model-specific Chat Completions kwargs
 # ---------------------------------------------------------------------------
 #
 # OpenAI chat models differ in which parameters they accept:
@@ -81,18 +79,15 @@ def _uses_max_completion_tokens(model: str) -> bool:
 
 
 def _supports_custom_temperature(model: str) -> bool:
-    """True when the model accepts an explicit temperature."""
+    """True when the model accepts an explicit temperature value."""
     # The o-series uses a fixed temperature; everything else is free.
     reasoning_prefixes = ("o1", "o3", "o4")
     return not any(model.startswith(p) for p in reasoning_prefixes)
 
 
 def _supports_json_mode(model: str) -> bool:
-    """Return True if the model supports `response_format={'type': 'json_object'}`.
-
-    GPT-4o, GPT-5, o-series, gpt-4-turbo all support it. GPT-3.5 needs 0125+.
-    Conservatively assume support and rely on prompt wording as fallback.
-    """
+    """Return True if the model supports ``response_format={"type": "json_object"}``."""
+    # GPT-4o, GPT-5, o-series, gpt-4-turbo all support it. GPT-3.5 needs 0125+.
     return True
 
 
@@ -103,24 +98,28 @@ def _build_chat_kwargs(
     temperature: float = 0.3,
     json_mode: bool = True,
 ) -> dict:
-    """Assemble kwargs for ChatCompletions.create while absorbing model quirks."""
+    """Assemble kwargs for ``ChatCompletions.create`` while absorbing model quirks."""
     kwargs: dict = {"model": model, "messages": messages}
 
-    # Token limit parameter.
+    # Token limit parameter name differs across series.
     if _uses_max_completion_tokens(model):
         kwargs["max_completion_tokens"] = max_tokens
     else:
         kwargs["max_tokens"] = max_tokens
 
-    # Temperature (omitted for o-series).
+    # o-series reasoning models reject `temperature`.
     if _supports_custom_temperature(model):
         kwargs["temperature"] = temperature
 
-    # JSON mode.
     if json_mode and _supports_json_mode(model):
         kwargs["response_format"] = {"type": "json_object"}
 
     return kwargs
+
+
+# ---------------------------------------------------------------------------
+# Data types
+# ---------------------------------------------------------------------------
 
 
 @dataclass
@@ -128,9 +127,9 @@ class ClusterAnnotation:
     """LLM-generated annotation for a single cluster.
 
     Attributes:
-        label: short label (10-20 chars), used as `cluster_name`
+        label: short label (10-20 chars), used as ``cluster_name``.
         summary: one- to three-sentence description, shown as the main
-            "representative text" in reports
+            "representative text" in reports.
     """
 
     label: str
@@ -142,11 +141,10 @@ class DatasetContext:
     """Result of the dataset-meaning inference step.
 
     Attributes:
-        domain: business domain (e.g. "Consumer electronics repair intake",
-            "SaaS customer support tickets")
+        domain: business domain (e.g. ``"Consumer electronics repair intake"``).
         granularity_hint: how specific the cluster labels should be
-            (e.g. "Break down by symptom type")
-        sample_texts: samples used to derive the context (kept for audit/logs)
+            (e.g. ``"Break down by symptom type"``).
+        sample_texts: samples used to derive the context (kept for audit/logs).
     """
 
     domain: str
@@ -154,7 +152,7 @@ class DatasetContext:
     sample_texts: list[str] = field(default_factory=list)
 
     def grounding_hint(self) -> str:
-        """Render the grounding instruction that gets embedded in downstream prompts."""
+        """Render the instruction that gets embedded in downstream prompts."""
         return (
             f"This dataset is '{self.domain}'. "
             f"Labelling guidance: {self.granularity_hint}. "
@@ -176,18 +174,7 @@ def infer_dataset_context(
     seed: int = 42,
     api_key: str | None = None,
 ) -> DatasetContext:
-    """Sample a few rows and ask the LLM to describe the dataset.
-
-    Args:
-        texts: normalised text rows (post deduplication)
-        model: chat model used for inference
-        sample_size: how many rows to sample
-        seed: RNG seed for reproducibility
-        api_key: explicit API key; otherwise read from env
-
-    Returns:
-        DatasetContext with `domain`, `granularity_hint`, and `sample_texts`.
-    """
+    """Sample a few rows and ask the LLM to describe the dataset."""
     if not texts:
         logger.warning("Texts are empty; skipping dataset context inference")
         return DatasetContext(
@@ -197,13 +184,13 @@ def infer_dataset_context(
 
     # Dedupe first so we don't over-sample repeated phrasings.
     unique_texts = list(dict.fromkeys(texts))
-    rng = _np_rng(seed)
+    rng = _numpy_rng(seed)
     n = min(sample_size, len(unique_texts))
     indices = rng.choice(len(unique_texts), size=n, replace=False)
     samples = [unique_texts[int(i)] for i in indices]
 
-    client = _make_client(api_key)
-    bullets = "\n".join(f"- {_trim_for_prompt(t)}" for t in samples)
+    client = _make_openai_client(api_key)
+    bullets = "\n".join(f"- {_truncate_for_prompt(t)}" for t in samples)
     system = (
         "You analyse datasets to extract their business context. "
         "From a small sample of records, return the domain and a labelling "
@@ -221,45 +208,44 @@ def infer_dataset_context(
     )
     user = f"Here are {n} randomly sampled records from the dataset:\n{bullets}"
 
-    for attempt in range(1, MAX_RETRIES + 1):
-        try:
-            response = client.chat.completions.create(
-                **_build_chat_kwargs(
-                    model=model,
-                    messages=[
-                        {"role": "system", "content": system},
-                        {"role": "user", "content": user},
-                    ],
-                    temperature=0.2,
-                    max_tokens=300,
-                )
+    def _call_infer() -> str:
+        response = client.chat.completions.create(
+            **_build_chat_kwargs(
+                model=model,
+                messages=[
+                    {"role": "system", "content": system},
+                    {"role": "user", "content": user},
+                ],
+                temperature=0.2,
+                max_tokens=300,
             )
-            raw = response.choices[0].message.content or "{}"
-            payload = _safe_json_loads(raw)
-            if payload is None:
-                payload = {}
-            domain = str(payload.get("domain", "")).strip() or "unknown"
-            hint = (
-                str(payload.get("granularity_hint", "")).strip()
-                or "label with concrete domain terms"
-            )
-            logger.info("Dataset context: domain=%s hint=%s", domain, hint)
-            return DatasetContext(
-                domain=domain, granularity_hint=hint, sample_texts=samples
-            )
-        except (RateLimitError, APIError) as exc:
-            wait = BACKOFF_BASE_SEC * (2 ** (attempt - 1))
-            logger.warning(
-                "dataset context API error (attempt=%d/%d): %s — waiting %.1fs",
-                attempt, MAX_RETRIES, exc, wait,
-            )
-            time.sleep(wait)
+        )
+        return response.choices[0].message.content or "{}"
 
-    logger.warning("Dataset context inference exhausted retries; using fallback")
+    try:
+        raw = utils.call_with_exponential_backoff(
+            _call_infer,
+            log_prefix="dataset context",
+            max_retries=MAX_RETRIES,
+            base_sec=BACKOFF_BASE_SEC,
+        )
+    except RuntimeError:
+        logger.warning("Dataset context inference exhausted retries; using fallback")
+        return DatasetContext(
+            domain="unknown",
+            granularity_hint="label with concrete domain terms",
+            sample_texts=samples,
+        )
+
+    payload = _safe_json_loads(raw) or {}
+    domain = str(payload.get("domain", "")).strip() or "unknown"
+    hint = (
+        str(payload.get("granularity_hint", "")).strip()
+        or "label with concrete domain terms"
+    )
+    logger.info("Dataset context: domain=%s hint=%s", domain, hint)
     return DatasetContext(
-        domain="unknown",
-        granularity_hint="label with concrete domain terms",
-        sample_texts=samples,
+        domain=domain, granularity_hint=hint, sample_texts=samples
     )
 
 
@@ -275,23 +261,12 @@ def generate_cluster_annotations(
     api_key: str | None = None,
     dataset_context: DatasetContext | None = None,
 ) -> dict[int, ClusterAnnotation]:
-    """Generate a `label` and a `summary` for every cluster.
-
-    Args:
-        summaries: output from `clusterer.summarize_clusters`
-        cache_dir: cache directory
-        model: chat model name
-        api_key: explicit API key
-        dataset_context: grounding context; None falls back to a generic prompt
-
-    Returns:
-        cluster_id -> ClusterAnnotation. Noise clusters get a fixed label.
-    """
+    """Generate a ``label`` and a ``summary`` for every cluster."""
     if not summaries:
         return {}
 
     cache_path = _cache_path_for(Path(cache_dir), model)
-    cache: dict[str, dict[str, str]] = _load_cache(cache_path)
+    cache: dict[str, dict[str, str]] = utils.load_pickle_cache(cache_path)
 
     # Cache key includes the grounding hint as salt: the same rep_texts can
     # produce different labels depending on the dataset context.
@@ -303,7 +278,7 @@ def generate_cluster_annotations(
             continue
         if not summary.representative_texts:
             continue
-        key = _hash_key(summary.representative_texts, grounding_salt)
+        key = _annotation_cache_key(summary.representative_texts, grounding_salt)
         tasks.append((summary.cluster_id, key, summary.representative_texts))
 
     pending = [(cid, key, texts) for cid, key, texts in tasks if key not in cache]
@@ -312,18 +287,30 @@ def generate_cluster_annotations(
             "Annotation generation: %d via API (cache hits: %d)",
             len(pending), len(tasks) - len(pending),
         )
-        client = _make_client(api_key)
-        new_annotations = _fetch_parallel(
+        client = _make_openai_client(api_key)
+        new_annotations = _annotate_clusters_in_parallel(
             client, pending, model, dataset_context
         )
         cache.update(new_annotations)
-        _save_cache(cache_path, cache)
+        utils.save_pickle_cache(cache_path, cache, also_json=True)
     else:
         logger.info(
             "Annotation generation: all %d clusters served from cache", len(tasks)
         )
 
-    # Assemble final result.
+    return _assemble_annotations(summaries, cache, grounding_salt)
+
+
+def _assemble_annotations(
+    summaries: list[ClusterSummary],
+    cache: dict[str, dict[str, str]],
+    grounding_salt: str,
+) -> dict[int, ClusterAnnotation]:
+    """Turn cached `{label, summary}` entries into a cluster_id-keyed dict.
+
+    Handles the three fallback cases (noise, missing reps, missing cache entry)
+    in one place so ``generate_cluster_annotations`` stays readable.
+    """
     result: dict[int, ClusterAnnotation] = {}
     for summary in summaries:
         if summary.cluster_id == NOISE_LABEL:
@@ -341,7 +328,7 @@ def generate_cluster_annotations(
                 summary="(no representative text available)",
             )
             continue
-        key = _hash_key(summary.representative_texts, grounding_salt)
+        key = _annotation_cache_key(summary.representative_texts, grounding_salt)
         entry = cache.get(key)
         if entry is None:
             result[summary.cluster_id] = ClusterAnnotation(
@@ -377,13 +364,7 @@ def resolve_label_duplicates(
         - Regenerate the rest with a differentiating prompt that shows both
           clusters' data.
         - Since resolving one duplicate group can create new conflicts, run
-          the loop up to `max_iterations` times.
-
-    Args:
-        summaries: clusterer output (used for size and rep_texts lookup)
-        annotations: output from `generate_cluster_annotations`
-        model / api_key / dataset_context: LLM plumbing
-        max_iterations: max number of passes before giving up
+          the loop up to ``max_iterations`` times.
 
     Returns:
         A new annotations dict with duplicates resolved. The input is not mutated.
@@ -393,21 +374,11 @@ def resolve_label_duplicates(
     working = dict(annotations)  # shallow copy
 
     for iteration in range(1, max_iterations + 1):
-        # Group cluster ids by their current label (noise excluded).
-        groups: dict[str, list[int]] = defaultdict(list)
-        for cid, ann in working.items():
-            if cid == NOISE_LABEL:
-                continue
-            groups[ann.label].append(cid)
-
-        duplicates = {
-            label: cids for label, cids in groups.items() if len(cids) >= 2
-        }
+        duplicates = _find_duplicate_labels(working)
         if not duplicates:
             if iteration > 1:
                 logger.info(
-                    "Duplicate resolution converged in %d iteration(s)",
-                    iteration,
+                    "Duplicate resolution converged in %d iteration(s)", iteration
                 )
             break
 
@@ -416,39 +387,17 @@ def resolve_label_duplicates(
             iteration, len(duplicates),
         )
 
-        # Build regeneration tasks.
-        regeneration_tasks: list[tuple[int, list[str], int, list[str]]] = []
-        for label, cids in duplicates.items():
-            # Largest cluster keeps its label; all others get regenerated.
-            ordered = sorted(
-                cids,
-                key=lambda c: (-size_by_cid.get(c, 0), c),
-            )
-            keeper = ordered[0]
-            keeper_reps = reps_by_cid.get(keeper, [])
-            for losing in ordered[1:]:
-                losing_reps = reps_by_cid.get(losing, [])
-                if not losing_reps:
-                    continue
-                regeneration_tasks.append(
-                    (losing, losing_reps, keeper, keeper_reps)
-                )
-            logger.debug(
-                "  duplicate '%s': keeper=#%d(size=%d), regenerate=%s",
-                label, keeper, size_by_cid.get(keeper, 0),
-                [c for c in ordered[1:]],
-            )
-
-        if not regeneration_tasks:
+        tasks = _build_differentiation_tasks(
+            duplicates, size_by_cid, reps_by_cid
+        )
+        if not tasks:
             break
 
-        # Issue differentiation calls in parallel.
-        client = _make_client(api_key)
-        new_labels = _differentiate_labels(
-            client, regeneration_tasks, model, dataset_context
+        client = _make_openai_client(api_key)
+        new_labels = _differentiate_labels_in_parallel(
+            client, tasks, model, dataset_context
         )
 
-        # Apply updates.
         for cid, (new_label, new_summary) in new_labels.items():
             old = working[cid]
             working[cid] = ClusterAnnotation(
@@ -466,6 +415,46 @@ def resolve_label_duplicates(
     return working
 
 
+def _find_duplicate_labels(
+    annotations: dict[int, ClusterAnnotation],
+) -> dict[str, list[int]]:
+    """Return ``{label: [cluster_id, ...]}`` for every label appearing ≥ 2 times."""
+    groups: dict[str, list[int]] = defaultdict(list)
+    for cid, ann in annotations.items():
+        if cid == NOISE_LABEL:
+            continue
+        groups[ann.label].append(cid)
+    return {label: cids for label, cids in groups.items() if len(cids) >= 2}
+
+
+def _build_differentiation_tasks(
+    duplicates: dict[str, list[int]],
+    size_by_cid: dict[int, int],
+    reps_by_cid: dict[int, list[str]],
+) -> list[tuple[int, list[str], int, list[str]]]:
+    """Decide which clusters keep their label and which need regeneration.
+
+    Returns a list of ``(losing_cid, losing_reps, keeper_cid, keeper_reps)``.
+    """
+    tasks: list[tuple[int, list[str], int, list[str]]] = []
+    for label, cids in duplicates.items():
+        # Largest cluster keeps its label; all others get regenerated.
+        ordered = sorted(cids, key=lambda c: (-size_by_cid.get(c, 0), c))
+        keeper = ordered[0]
+        keeper_reps = reps_by_cid.get(keeper, [])
+        for losing in ordered[1:]:
+            losing_reps = reps_by_cid.get(losing, [])
+            if not losing_reps:
+                continue
+            tasks.append((losing, losing_reps, keeper, keeper_reps))
+        logger.debug(
+            "  duplicate '%s': keeper=#%d(size=%d), regenerate=%s",
+            label, keeper, size_by_cid.get(keeper, 0),
+            [c for c in ordered[1:]],
+        )
+    return tasks
+
+
 # ---------------------------------------------------------------------------
 # Backwards compatibility: generate_cluster_names
 # ---------------------------------------------------------------------------
@@ -477,7 +466,7 @@ def generate_cluster_names(
     model: str = DEFAULT_MODEL,
     api_key: str | None = None,
 ) -> dict[int, str]:
-    """Legacy wrapper: returns cluster_id -> label only."""
+    """Legacy wrapper: returns ``cluster_id -> label`` only."""
     annotations = generate_cluster_annotations(
         summaries, cache_dir, model, api_key
     )
@@ -485,11 +474,11 @@ def generate_cluster_names(
 
 
 # ---------------------------------------------------------------------------
-# Internal: OpenAI client and retry
+# OpenAI client
 # ---------------------------------------------------------------------------
 
 
-def _make_client(api_key: str | None) -> OpenAI:
+def _make_openai_client(api_key: str | None) -> OpenAI:
     """Build the OpenAI client."""
     key = api_key or os.getenv("OPENAI_API_KEY")
     if not key:
@@ -500,7 +489,7 @@ def _make_client(api_key: str | None) -> OpenAI:
     return OpenAI(api_key=key, timeout=timeout)
 
 
-def _np_rng(seed: int):
+def _numpy_rng(seed: int):
     """Lazily import numpy and return a default_rng (helps tests mock this out)."""
     import numpy as np
 
@@ -508,11 +497,11 @@ def _np_rng(seed: int):
 
 
 # ---------------------------------------------------------------------------
-# Internal: initial annotation
+# Annotation: parallel execution and single-call helper
 # ---------------------------------------------------------------------------
 
 
-def _build_system_prompt(context: DatasetContext | None) -> str:
+def _build_annotation_system_prompt(context: DatasetContext | None) -> str:
     """Assemble the system prompt with optional grounding context."""
     grounding = context.grounding_hint() if context else ""
     base = (
@@ -537,21 +526,25 @@ def _build_system_prompt(context: DatasetContext | None) -> str:
     return base
 
 
-def _fetch_parallel(
+def _annotate_clusters_in_parallel(
     client: OpenAI,
     pending: list[tuple[int, str, list[str]]],
     model: str,
     context: DatasetContext | None,
 ) -> dict[str, dict[str, str]]:
-    """Issue label/summary requests for each cluster in parallel."""
+    """Issue label/summary requests for each cluster in parallel.
+
+    Results are keyed by the cache key so callers can merge them into the
+    persistent cache directly.
+    """
     results: dict[str, dict[str, str]] = {}
     lock = threading.Lock()
-    system_prompt = _build_system_prompt(context)
+    system_prompt = _build_annotation_system_prompt(context)
 
     with ThreadPoolExecutor(max_workers=MAX_CONCURRENCY) as executor:
         future_to_meta = {
             executor.submit(
-                _request_annotation, client, texts, model, system_prompt
+                _invoke_annotation_llm, client, texts, model, system_prompt
             ): (cid, key)
             for cid, key, texts in pending
         }
@@ -576,52 +569,49 @@ def _fetch_parallel(
     return results
 
 
-def _request_annotation(
+def _invoke_annotation_llm(
     client: OpenAI,
     rep_texts: list[str],
     model: str,
     system_prompt: str,
 ) -> dict[str, str]:
-    """Call ChatCompletions with exponential backoff."""
-    bullets = "\n".join(f"- {_trim_for_prompt(t)}" for t in rep_texts)
+    """Single Chat Completions call for one cluster's annotation."""
+    bullets = "\n".join(f"- {_truncate_for_prompt(t)}" for t in rep_texts)
     user_prompt = (
         "Here are representative records of one cluster:\n"
         f"{bullets}\n\n"
         "Return the label and summary as JSON."
     )
-    for attempt in range(1, MAX_RETRIES + 1):
-        try:
-            response = client.chat.completions.create(
-                **_build_chat_kwargs(
-                    model=model,
-                    messages=[
-                        {"role": "system", "content": system_prompt},
-                        {"role": "user", "content": user_prompt},
-                    ],
-                    temperature=0.3,
-                    max_tokens=400,
-                )
+
+    def _call() -> str:
+        response = client.chat.completions.create(
+            **_build_chat_kwargs(
+                model=model,
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_prompt},
+                ],
+                temperature=0.3,
+                max_tokens=400,
             )
-            content = response.choices[0].message.content or "{}"
-            return _parse_annotation_json(content)
-        except (RateLimitError, APIError) as exc:
-            wait = BACKOFF_BASE_SEC * (2 ** (attempt - 1))
-            logger.warning(
-                "annotation API error (attempt=%d/%d): %s — waiting %.1fs",
-                attempt, MAX_RETRIES, exc, wait,
-            )
-            time.sleep(wait)
-    raise RuntimeError(
-        f"Annotation generation exceeded {MAX_RETRIES} retries"
+        )
+        return response.choices[0].message.content or "{}"
+
+    raw = utils.call_with_exponential_backoff(
+        _call,
+        log_prefix="annotation",
+        max_retries=MAX_RETRIES,
+        base_sec=BACKOFF_BASE_SEC,
     )
+    return _parse_annotation_json(raw)
 
 
 # ---------------------------------------------------------------------------
-# Internal: duplicate label differentiation
+# Differentiation: parallel execution and single-call helper
 # ---------------------------------------------------------------------------
 
 
-def _differentiate_labels(
+def _differentiate_labels_in_parallel(
     client: OpenAI,
     tasks: list[tuple[int, list[str], int, list[str]]],
     model: str,
@@ -630,9 +620,9 @@ def _differentiate_labels(
     """Run the differentiation prompt in parallel for every duplicate.
 
     Args:
-        tasks: list of (losing_cid, losing_reps, keeper_cid, keeper_reps)
+        tasks: list of ``(losing_cid, losing_reps, keeper_cid, keeper_reps)``
     Returns:
-        losing_cid -> (new_label, new_summary_or_None)
+        ``losing_cid -> (new_label, new_summary_or_None)``
     """
     results: dict[int, tuple[str, str | None]] = {}
     lock = threading.Lock()
@@ -641,7 +631,7 @@ def _differentiate_labels(
     with ThreadPoolExecutor(max_workers=MAX_CONCURRENCY) as executor:
         future_to_cid = {
             executor.submit(
-                _request_differentiated_label,
+                _invoke_differentiation_llm,
                 client, losing_reps, keeper_reps, model, grounding,
             ): losing_cid
             for losing_cid, losing_reps, _, keeper_reps in tasks
@@ -665,7 +655,7 @@ def _differentiate_labels(
     return results
 
 
-def _request_differentiated_label(
+def _invoke_differentiation_llm(
     client: OpenAI,
     losing_reps: list[str],
     keeper_reps: list[str],
@@ -673,8 +663,8 @@ def _request_differentiated_label(
     grounding: str,
 ) -> tuple[str, str | None]:
     """Request a label for cluster A that clearly separates it from cluster B."""
-    losing_bullets = "\n".join(f"- {_trim_for_prompt(t)}" for t in losing_reps)
-    keeper_bullets = "\n".join(f"- {_trim_for_prompt(t)}" for t in keeper_reps)
+    losing_bullets = "\n".join(f"- {_truncate_for_prompt(t)}" for t in losing_reps)
+    keeper_bullets = "\n".join(f"- {_truncate_for_prompt(t)}" for t in keeper_reps)
 
     system = (
         "You are a data analyst. Two clusters A and B received the same "
@@ -705,42 +695,40 @@ def _request_differentiated_label(
         "Return the new label and (optionally) summary for cluster A as JSON."
     )
 
-    for attempt in range(1, MAX_RETRIES + 1):
-        try:
-            response = client.chat.completions.create(
-                **_build_chat_kwargs(
-                    model=model,
-                    messages=[
-                        {"role": "system", "content": system},
-                        {"role": "user", "content": user},
-                    ],
-                    temperature=0.35,
-                    max_tokens=400,
-                )
+    def _call() -> str:
+        response = client.chat.completions.create(
+            **_build_chat_kwargs(
+                model=model,
+                messages=[
+                    {"role": "system", "content": system},
+                    {"role": "user", "content": user},
+                ],
+                temperature=0.35,
+                max_tokens=400,
             )
-            content = response.choices[0].message.content or "{}"
-            parsed = _parse_annotation_json(content)
-            label = parsed["label"]
-            # Summary is optional.
-            summary = parsed["summary"] if parsed.get("summary") else None
-            return label, summary
-        except (RateLimitError, APIError) as exc:
-            wait = BACKOFF_BASE_SEC * (2 ** (attempt - 1))
-            logger.warning(
-                "dedup API error (attempt=%d/%d): %s — waiting %.1fs",
-                attempt, MAX_RETRIES, exc, wait,
-            )
-            time.sleep(wait)
-    raise RuntimeError("Differentiating label generation exceeded retries")
+        )
+        return response.choices[0].message.content or "{}"
+
+    raw = utils.call_with_exponential_backoff(
+        _call,
+        log_prefix="dedup",
+        max_retries=MAX_RETRIES,
+        base_sec=BACKOFF_BASE_SEC,
+    )
+    parsed = _parse_annotation_json(raw)
+    label = parsed["label"]
+    # Summary is optional in the differentiation schema.
+    summary = parsed["summary"] if parsed.get("summary") else None
+    return label, summary
 
 
 # ---------------------------------------------------------------------------
-# Internal: parsing / sanitisation / caching
+# Parsing / sanitisation
 # ---------------------------------------------------------------------------
 
 
 def _parse_annotation_json(raw: str) -> dict[str, str]:
-    """Parse the LLM response JSON into `{label, summary}`."""
+    """Parse the LLM response JSON into ``{label, summary}``."""
     text = raw.strip()
     if text.startswith("```"):
         text = text.strip("`")
@@ -756,7 +744,7 @@ def _parse_annotation_json(raw: str) -> dict[str, str]:
 
 
 def _safe_json_loads(text: str) -> dict | None:
-    """JSON parse that returns None on failure."""
+    """JSON parse that returns ``None`` on failure (and logs)."""
     try:
         return json.loads(text)
     except json.JSONDecodeError as exc:
@@ -764,10 +752,17 @@ def _safe_json_loads(text: str) -> dict | None:
         return None
 
 
+# Characters we strip from LLM-produced labels. Keep this tuple small — we only
+# want to remove common decoration, not mangle legitimate content.
+_LABEL_JUNK_CHARS: tuple[str, ...] = (
+    '"', "'", "「", "」", "『", "』", "`",
+)
+
+
 def _sanitize_label(raw: str) -> str:
-    """Clean up the label string."""
+    """Clean up an LLM label: strip junk characters, keep the first line, cap length."""
     label = raw.strip()
-    for ch in ('"', "'", "「", "」", "『", "』", "`"):
+    for ch in _LABEL_JUNK_CHARS:
         label = label.replace(ch, "")
     for line in label.splitlines():
         line = line.strip()
@@ -782,8 +777,9 @@ def _sanitize_label(raw: str) -> str:
 
 
 def _sanitize_summary(raw: str) -> str:
-    """Clean up the summary string."""
+    """Clean up an LLM summary: collapse whitespace, cap length."""
     summary = raw.strip()
+    # Strip surrounding quotes only when they wrap the whole string.
     for ch in ('"', "`"):
         if summary.startswith(ch) and summary.endswith(ch):
             summary = summary[1:-1].strip()
@@ -795,56 +791,34 @@ def _sanitize_summary(raw: str) -> str:
     return summary
 
 
-def _trim_for_prompt(text: str, max_chars: int = 500) -> str:
-    """Keep prompt payloads from blowing up on unusually long texts."""
+def _truncate_for_prompt(text: str, max_chars: int = 500) -> str:
+    """Collapse newlines and cap an individual record's length inside a prompt."""
     text = text.replace("\n", " ").strip()
     if len(text) > max_chars:
         return text[:max_chars] + "…"
     return text
 
 
-def _hash_key(rep_texts: list[str], salt: str = "") -> str:
-    """Stable cache key derived from the representative texts plus grounding salt."""
+# ---------------------------------------------------------------------------
+# Cache key / path
+# ---------------------------------------------------------------------------
+
+
+def _annotation_cache_key(rep_texts: list[str], salt: str) -> str:
+    """Stable key that factors in both the representatives and the grounding salt."""
     payload = "\n".join(rep_texts) + "||" + salt
-    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+    return utils.content_hash(payload)
 
 
 def _cache_path_for(cache_dir: Path, model: str) -> Path:
     """Per-model cache file path.
 
-    The `v3` suffix distinguishes from older schemas (v1: label only,
-    v2: label + summary without grounding salt).
+    The ``v3`` suffix distinguishes this schema (label + summary with grounding
+    salt) from older caches (v1 was label-only; v2 had no grounding salt).
     """
     cache_dir.mkdir(parents=True, exist_ok=True)
     safe_model = model.replace("/", "_")
     return cache_dir / f"cluster_annotations_v3_{safe_model}.pkl"
-
-
-def _load_cache(path: Path) -> dict[str, dict[str, str]]:
-    """Load the pickle cache; return empty dict on any failure."""
-    if not path.exists():
-        return {}
-    try:
-        with path.open("rb") as f:
-            cache = pickle.load(f)
-        if not isinstance(cache, dict):
-            logger.warning("Annotation cache has invalid format: %s", path)
-            return {}
-        return cache
-    except (pickle.UnpicklingError, EOFError) as exc:
-        logger.warning("Annotation cache load failed (%s); rebuilding", exc)
-        return {}
-
-
-def _save_cache(path: Path, cache: dict[str, dict[str, str]]) -> None:
-    """Persist the cache atomically plus a human-readable JSON sidecar."""
-    tmp = path.with_suffix(path.suffix + ".tmp")
-    with tmp.open("wb") as f:
-        pickle.dump(cache, f, protocol=pickle.HIGHEST_PROTOCOL)
-    tmp.replace(path)
-    json_path = path.with_suffix(".json")
-    with json_path.open("w", encoding="utf-8") as f:
-        json.dump(cache, f, ensure_ascii=False, indent=2)
 
 
 # ---------------------------------------------------------------------------
@@ -853,5 +827,5 @@ def _save_cache(path: Path, cache: dict[str, dict[str, str]]) -> None:
 
 
 def _label_frequencies(annotations: dict[int, ClusterAnnotation]) -> Counter:
-    """Count label frequencies (used for duplicate detection tests)."""
+    """Count label frequencies — used by duplicate-detection tests and the pipeline."""
     return Counter(ann.label for ann in annotations.values())

@@ -1,33 +1,34 @@
-"""OpenAI Embeddings retrieval — with cache.
+"""OpenAI Embeddings retrieval with caching.
 
 Responsibilities:
-    - Fetch embeddings in batches.
+    - Fetch embeddings in parallel batches.
     - Cache per-text results locally (pickle, keyed by SHA-256 of the text).
-    - Retry with exponential backoff on rate-limit/API errors.
+    - Retry transient errors with exponential backoff.
+
+Shared helpers live in ``utils`` (cache I/O, content hashing, retry wrapper).
 """
 
 from __future__ import annotations
 
-import hashlib
 import logging
 import os
-import pickle
 import threading
-import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
 import numpy as np
-from openai import OpenAI, RateLimitError, APIError
+from openai import OpenAI
 from tqdm import tqdm
+
+from . import utils
 
 logger = logging.getLogger(__name__)
 
 DEFAULT_MODEL: str = "text-embedding-3-small"
 BATCH_SIZE: int = 100              # Within OpenAI's recommended batch size.
+MAX_CONCURRENCY: int = 8           # Number of parallel batches. Scale with your tier.
 MAX_RETRIES: int = 5
 BACKOFF_BASE_SEC: float = 2.0
-MAX_CONCURRENCY: int = 8           # Number of parallel batches. Scale with your tier.
 
 
 def get_embeddings(
@@ -36,34 +37,28 @@ def get_embeddings(
     model: str = DEFAULT_MODEL,
     api_key: str | None = None,
 ) -> np.ndarray:
-    """Return the embedding vectors for the given texts.
+    """Return the embedding vectors for ``texts``, caching misses on disk.
 
     Args:
-        texts: normalised input texts
-        cache_dir: directory used to persist the embedding cache
-        model: OpenAI embedding model name
-        api_key: pass an API key explicitly; otherwise read from OPENAI_API_KEY
+        texts: normalised input texts (duplicates should already be collapsed).
+        cache_dir: directory used to persist the embedding cache.
+        model: OpenAI embedding model name.
+        api_key: pass an API key explicitly; otherwise read from ``OPENAI_API_KEY``.
 
     Returns:
-        `ndarray` with shape `(len(texts), D)`, matching the input order.
+        ``ndarray`` with shape ``(len(texts), D)``, matching the input order.
 
     Raises:
-        RuntimeError: no API key is available, or retries were exhausted
+        RuntimeError: no API key is available, or retries were exhausted.
     """
     if not texts:
         raise ValueError("Received an empty text list")
 
     cache_path = _cache_path_for(Path(cache_dir), model)
-    cache: dict[str, np.ndarray] = _load_cache(cache_path)
+    cache: dict[str, np.ndarray] = utils.load_pickle_cache(cache_path)
 
     # Only ask the API about texts that aren't already cached.
-    missing_indices: list[int] = []
-    missing_texts: list[str] = []
-    for idx, text in enumerate(texts):
-        key = _hash_key(text)
-        if key not in cache:
-            missing_indices.append(idx)
-            missing_texts.append(text)
+    missing_texts = [t for t in texts if utils.content_hash(t) not in cache]
 
     if missing_texts:
         logger.info(
@@ -71,16 +66,16 @@ def get_embeddings(
             len(missing_texts),
             len(texts) - len(missing_texts),
         )
-        client = _make_client(api_key)
-        new_vectors = _fetch_batched(client, missing_texts, model)
+        client = _make_openai_client(api_key)
+        new_vectors = _embed_texts_in_parallel(client, missing_texts, model)
         for text, vec in zip(missing_texts, new_vectors, strict=True):
-            cache[_hash_key(text)] = vec
-        _save_cache(cache_path, cache)
+            cache[utils.content_hash(text)] = vec
+        utils.save_pickle_cache(cache_path, cache)
     else:
         logger.info("All %d items served from cache", len(texts))
 
     # Assemble the full array in the original input order.
-    vectors = np.stack([cache[_hash_key(t)] for t in texts], axis=0)
+    vectors = np.stack([cache[utils.content_hash(t)] for t in texts], axis=0)
     return vectors.astype(np.float32, copy=False)
 
 
@@ -89,12 +84,8 @@ def get_embeddings(
 # ---------------------------------------------------------------------------
 
 
-def _make_client(api_key: str | None) -> OpenAI:
-    """Build an OpenAI client.
-
-    Raises:
-        RuntimeError: when no API key can be resolved
-    """
+def _make_openai_client(api_key: str | None) -> OpenAI:
+    """Instantiate an ``OpenAI`` client, honouring env / timeout settings."""
     key = api_key or os.getenv("OPENAI_API_KEY")
     if not key:
         raise RuntimeError(
@@ -104,33 +95,33 @@ def _make_client(api_key: str | None) -> OpenAI:
     return OpenAI(api_key=key, timeout=timeout)
 
 
-def _fetch_batched(client: OpenAI, texts: list[str], model: str) -> list[np.ndarray]:
-    """Send texts to the API in parallel batches.
+def _embed_texts_in_parallel(
+    client: OpenAI,
+    texts: list[str],
+    model: str,
+) -> list[np.ndarray]:
+    """Split ``texts`` into batches and fetch them concurrently.
 
-    Batches are sliced sequentially so ordering is deterministic. The actual
-    HTTP requests run concurrently via `ThreadPoolExecutor` (the OpenAI client
-    is thread-safe).
+    The OpenAI client is thread-safe, so several batches can be in flight at
+    once. Results are reordered by starting index before being returned.
     """
-    # Pre-slice batches with their starting indices so we can reassemble in order.
-    batches: list[tuple[int, list[str]]] = []
-    for start in range(0, len(texts), BATCH_SIZE):
-        batches.append((start, texts[start : start + BATCH_SIZE]))
-
-    # Store results keyed by their start index.
+    batches: list[tuple[int, list[str]]] = [
+        (start, texts[start : start + BATCH_SIZE])
+        for start in range(0, len(texts), BATCH_SIZE)
+    ]
     results_by_start: dict[int, list[np.ndarray]] = {}
     results_lock = threading.Lock()
 
     with ThreadPoolExecutor(max_workers=MAX_CONCURRENCY) as executor:
         future_to_start = {
-            executor.submit(_request_with_retry, client, batch, model): start
+            executor.submit(_embed_batch, client, batch, model): start
             for start, batch in batches
         }
         with tqdm(total=len(batches), desc="Embeddings", unit="batch") as pbar:
             for future in as_completed(future_to_start):
                 start = future_to_start[future]
-                batch_vectors = future.result()
                 with results_lock:
-                    results_by_start[start] = batch_vectors
+                    results_by_start[start] = future.result()
                 pbar.update(1)
 
     # Concatenate batches in their original order.
@@ -140,45 +131,24 @@ def _fetch_batched(client: OpenAI, texts: list[str], model: str) -> list[np.ndar
     return results
 
 
-def _request_with_retry(
+def _embed_batch(
     client: OpenAI, batch: list[str], model: str
 ) -> list[np.ndarray]:
-    """Call `embeddings.create` with exponential backoff on retriable errors."""
-    for attempt in range(1, MAX_RETRIES + 1):
-        try:
-            response = client.embeddings.create(model=model, input=batch)
-            # response.data is guaranteed to be in input order.
-            return [np.asarray(item.embedding, dtype=np.float32) for item in response.data]
-        except RateLimitError as exc:
-            wait = BACKOFF_BASE_SEC * (2 ** (attempt - 1))
-            logger.warning(
-                "Rate limited (attempt=%d/%d): %s — waiting %.1fs",
-                attempt,
-                MAX_RETRIES,
-                exc,
-                wait,
-            )
-            time.sleep(wait)
-        except APIError as exc:
-            # Retry 5xx / transient API errors too.
-            wait = BACKOFF_BASE_SEC * (2 ** (attempt - 1))
-            logger.warning(
-                "Transient API error (attempt=%d/%d): %s — waiting %.1fs",
-                attempt,
-                MAX_RETRIES,
-                exc,
-                wait,
-            )
-            time.sleep(wait)
+    """Call ``embeddings.create`` for a single batch with retry/backoff."""
+    def _call() -> list[np.ndarray]:
+        response = client.embeddings.create(model=model, input=batch)
+        # response.data is guaranteed to be in input order.
+        return [
+            np.asarray(item.embedding, dtype=np.float32)
+            for item in response.data
+        ]
 
-    raise RuntimeError(
-        f"OpenAI embeddings retrieval exceeded {MAX_RETRIES} retries"
+    return utils.call_with_exponential_backoff(
+        _call,
+        log_prefix="embeddings",
+        max_retries=MAX_RETRIES,
+        base_sec=BACKOFF_BASE_SEC,
     )
-
-
-def _hash_key(text: str) -> str:
-    """Stable cache key for a single text."""
-    return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
 
 def _cache_path_for(cache_dir: Path, model: str) -> Path:
@@ -187,29 +157,3 @@ def _cache_path_for(cache_dir: Path, model: str) -> Path:
     # Sanitize slashes in case of namespaced model names.
     safe_model = model.replace("/", "_")
     return cache_dir / f"embeddings_{safe_model}.pkl"
-
-
-def _load_cache(path: Path) -> dict[str, np.ndarray]:
-    """Load the pickle cache. Returns an empty dict if missing/corrupt."""
-    if not path.exists():
-        return {}
-    try:
-        with path.open("rb") as f:
-            cache = pickle.load(f)
-        if not isinstance(cache, dict):
-            logger.warning("Cache has invalid format, rebuilding: %s", path)
-            return {}
-        logger.debug("Cache loaded: %d entries", len(cache))
-        return cache
-    except (pickle.UnpicklingError, EOFError) as exc:
-        logger.warning("Cache load failed (%s); discarding and rebuilding", exc)
-        return {}
-
-
-def _save_cache(path: Path, cache: dict[str, np.ndarray]) -> None:
-    """Persist the pickle cache using an atomic replace."""
-    tmp = path.with_suffix(path.suffix + ".tmp")
-    with tmp.open("wb") as f:
-        pickle.dump(cache, f, protocol=pickle.HIGHEST_PROTOCOL)
-    tmp.replace(path)
-    logger.debug("Cache saved: %d entries -> %s", len(cache), path)

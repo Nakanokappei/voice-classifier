@@ -13,6 +13,8 @@ from dataclasses import dataclass
 import numpy as np
 import pandas as pd
 
+from . import utils
+
 logger = logging.getLogger(__name__)
 
 NOISE_LABEL: int = -1
@@ -44,9 +46,9 @@ def summarize_clusters(
     """Produce per-cluster summaries by picking the top-K rows nearest each centroid.
 
     Args:
-        df: DataFrame containing `_normalized_text` (row-aligned with `labels`)
-        embeddings: shape (N, D) embedding matrix
-        labels: cluster id for each row, shape (N,)
+        df: DataFrame containing ``_normalized_text`` (row-aligned with ``labels``)
+        embeddings: shape ``(N, D)`` embedding matrix
+        labels: cluster id for each row, shape ``(N,)``
         top_k: number of representative rows to pick per cluster
 
     Returns:
@@ -60,18 +62,11 @@ def summarize_clusters(
         )
 
     # Normalise up-front so centroid math and cosine distance stay consistent.
-    normalized = _l2_normalize(embeddings)
+    normalized = utils.l2_normalize(embeddings)
 
     summaries: list[ClusterSummary] = []
-    unique_labels = sorted(set(labels.tolist()))
-    # Put noise at the tail.
-    ordered = [c for c in unique_labels if c != NOISE_LABEL]
-    if NOISE_LABEL in unique_labels:
-        ordered.append(NOISE_LABEL)
-
-    for cluster_id in ordered:
-        member_mask = labels == cluster_id
-        member_indices = np.where(member_mask)[0]
+    for cluster_id in _cluster_ids_with_noise_last(labels):
+        member_indices = np.where(labels == cluster_id)[0]
         size = int(member_indices.size)
 
         if cluster_id == NOISE_LABEL:
@@ -86,8 +81,7 @@ def summarize_clusters(
             )
             continue
 
-        # Pick the top-K rows closest to the centroid.
-        rep_indices = _pick_representatives(
+        rep_indices = _pick_centroid_nearest(
             normalized[member_indices], member_indices, top_k
         )
         rep_texts = [str(df.iloc[i]["_normalized_text"]) for i in rep_indices]
@@ -110,29 +104,23 @@ def summarize_clusters(
 # ---------------------------------------------------------------------------
 
 
-def _l2_normalize(x: np.ndarray) -> np.ndarray:
-    """Normalise rows to unit L2 length; replace zero-norm rows with `e_0`.
-
-    Mirrors the rule used in `tuner._l2_normalize` so that downstream math
-    (`member_vectors @ centroid`) never encounters divide-by-zero.
-    """
-    norms = np.linalg.norm(x, axis=1, keepdims=True)
-    zero_mask = norms.flatten() == 0
-    if zero_mask.any():
-        x = x.copy()
-        x[zero_mask, 0] = 1.0
-        norms = np.linalg.norm(x, axis=1, keepdims=True)
-    return x / norms
+def _cluster_ids_with_noise_last(labels: np.ndarray) -> list[int]:
+    """Return the unique cluster ids in ascending order with noise moved to the tail."""
+    unique = sorted(set(labels.tolist()))
+    ordered = [cid for cid in unique if cid != NOISE_LABEL]
+    if NOISE_LABEL in unique:
+        ordered.append(NOISE_LABEL)
+    return ordered
 
 
-def _pick_representatives(
+def _pick_centroid_nearest(
     member_vectors: np.ndarray,
     member_indices: np.ndarray,
     top_k: int,
 ) -> list[int]:
-    """Return the top-K indices closest to the cluster centroid.
+    """Return the top-K row indices closest to the cluster centroid.
 
-    Centroid = L2-normalised mean of `member_vectors`. Closeness is ranked by
+    Centroid = L2-normalised mean of ``member_vectors``. Closeness is ranked by
     descending cosine similarity (equivalent to ascending cosine distance).
     """
     if member_vectors.shape[0] == 0:
@@ -145,7 +133,7 @@ def _pick_representatives(
         return member_indices[:top_k].tolist()
     centroid /= centroid_norm
 
-    # `member_vectors` is already normalised, so zero rows do not occur here.
+    # ``member_vectors`` is already normalised, so zero rows do not occur here.
     # Guard the matmul against stray numerical noise anyway.
     with np.errstate(divide="ignore", invalid="ignore", over="ignore"):
         similarities = member_vectors @ centroid
