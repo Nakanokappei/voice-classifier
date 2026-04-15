@@ -1,59 +1,66 @@
-# Data Format — 入力CSV仕様
+# Data Format — Input CSV Specification
 
-## エンコーディング
+## Encoding
 
-- 推奨: **UTF-8 (BOMあり/なし両対応)**
-- Windows Excel から保存された場合は **CP932 (Shift_JIS)** も自動判定で読む
+- Preferred: **UTF-8 (with or without BOM)**.
+- Windows-Excel exports in **CP932 (Shift_JIS)** are auto-detected.
+- Also tried: EUC-JP, ISO-2022-JP as fallbacks.
 
-## 必須条件
+## Requirements
 
-- **ヘッダ行が必須**
-- 解析対象のテキスト列を `--text-col` で指定する
-- 対象列は文字列型。数値・日時が混じっても文字列化する
+- **The header row is required.**
+- Pick the target text column via `--text-col` (or combine several with
+  `--text-cols`).
+- Text columns are treated as strings; numeric/date-looking values are
+  stringified.
 
-## 前処理ルール
+## Preprocessing Rules
 
-`loader.py` 内で以下を適用し、内部カラム `_normalized_text` として保持する。
+`loader.py` applies the following and stores the result in an internal
+`_normalized_text` column:
 
-| ステップ | 処理 |
+| Step | Operation |
 |---|---|
-| 1. トリム | 先頭末尾の空白を削除 |
-| 2. Unicode正規化 | NFKC（全角英数 → 半角 等） |
-| 3. 改行統一 | `\r\n`, `\r` → `\n` |
-| 4. 空白圧縮 | 連続する空白・タブ・改行を1スペースに |
-| 5. 空行除去 | 空文字・None・長さ0はドロップ |
-| 6. 重複除去 | 同一テキストは1件に集約し `_duplicate_count` 列を付与 |
+| 1. Trim | Remove leading and trailing whitespace |
+| 2. Unicode normalisation | NFKC (fullwidth → halfwidth, etc.) |
+| 3. Line-ending unification | `\r\n`, `\r` → `\n` |
+| 4. Whitespace collapse | Runs of spaces/tabs/newlines → single space |
+| 5. Empty-row drop | Strings of length 0 are removed |
+| 6. Deduplication | Identical texts collapse to one row; count goes to `_duplicate_count` |
 
-> PII（個人情報）は含まれ得る前提。除去・マスキングは利用者の責務とし、
-> このパイプラインは入力をそのまま OpenAI Embeddings に送る点に留意すること。
+> **PII assumption.** Input data can contain personally identifiable
+> information. Redaction and masking are the caller's responsibility; this
+> pipeline sends the text through to the OpenAI Embeddings endpoint as-is.
 
-## 列の扱い
+## Column Handling
 
-- 元のCSVのすべての列は出力CSVに保持する
-- 内部追加列:
-    - `_normalized_text` ... 前処理後のテキスト
-    - `_duplicate_count` ... 同一テキストの重複件数
-    - `cluster_id` ... クラスタID（ノイズは `-1`）
+- Every column of the input CSV is preserved in the output CSV.
+- Internal columns added by the pipeline:
+    - `_normalized_text` — post-normalisation text (internal use)
+    - `_duplicate_count` — number of duplicates collapsed into this row
+    - `cluster_id` — cluster label assigned by the pipeline (noise = `-1`)
+    - `cluster_name` — LLM-generated label (present when `--name-clusters` is on)
 
-## サンプル
+## Example
 
 ```csv
-受付日,カテゴリ,対応内容
-2026-01-10,返品,商品が届いたが色が違った。返品したい
-2026-01-11,配送,配達予定日を過ぎても届かない
-2026-01-11,返品,サイズが合わなかったので返品したい
+received_at,category,response_body
+2026-01-10,return,The product arrived but the colour was wrong. I'd like to return it.
+2026-01-11,shipping,Past the scheduled delivery date and still nothing has arrived.
+2026-01-11,return,The size didn't fit so I'd like to return it.
 ```
 
-呼び出し:
+Invocation:
 
 ```bash
-python src/pipeline.py --input tickets.csv --text-col "対応内容"
+python src/pipeline.py --input tickets.csv --text-col "response_body"
 ```
 
-## 文字数の目安
+## Length Guidance
 
-- `text-embedding-3-small` は最大 8191 トークン
-- 日本語は 1 文字 ≒ 1–2 トークン
-- 1 レコードあたり 4000 字を超えないことを推奨
+- `text-embedding-3-small` accepts up to 8,191 tokens per input.
+- Japanese typically uses 1-2 tokens per character; English about 0.3-0.5.
+- Keep single records under ~4,000 characters for safety.
 
-超えた場合、`loader.py` で先頭 4000 字にトランケートし、ログに WARNING を出力する。
+If a record exceeds the limit, `loader.py` truncates it to the first 4,000
+characters and logs a WARNING.

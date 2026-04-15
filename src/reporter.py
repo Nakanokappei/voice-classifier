@@ -1,10 +1,12 @@
-"""レポート出力 — 4つの成果物を生成する.
+"""Report writing — emits the four output artifacts.
 
-生成ファイル:
-    - report.md              クラスタリング結果レポート（採用結果・クラスタ詳細）
-    - parameter_search.md    パラメータ探索レポート（全試行・採用理由・除外理由）
-    - clusters.csv           全レコードに cluster_id を付与したCSV
-    - params.json            採用パラメータ・スコアの機械可読版
+Generated files:
+    - report.md              Clustering result (selected config, per-cluster reps)
+    - parameter_search.html  Parameter-search report with a dual-axis chart on top
+    - clusters.csv           One row per cluster: id, name, size, summary, rep_1..N
+    - <input>_classified.csv Original data plus `cluster_id` (+ `cluster_name` if
+                             annotations are available)
+    - params.json            Machine-readable metadata
 """
 
 from __future__ import annotations
@@ -24,14 +26,14 @@ from .tuner import BestConfig
 logger = logging.getLogger(__name__)
 
 QUALITY_LABEL: dict[str, str] = {
-    "good": "良好",
-    "warn": "許容（注意）",
-    "poor": "要再検討",
+    "good": "Good",
+    "warn": "Acceptable (with caveats)",
+    "poor": "Needs review",
 }
 
 OutputFormat = Literal["md", "html", "both"]
 
-# HTML レポート用の埋め込み CSS. テーブル可読性と PII 配慮の配色
+# Embedded CSS for HTML reports — kept inline so the file is self-contained.
 _HTML_CSS = """
 :root {
   --fg: #1f2328;
@@ -81,32 +83,31 @@ def write_report(
     cluster_annotations: dict[int, ClusterAnnotation] | None = None,
     output_format: OutputFormat = "md",
 ) -> None:
-    """成果物を `output_dir` に書き出す.
+    """Write the output artifacts under `output_dir`.
 
     Args:
-        output_dir: 出力先（存在しなければ作成）
-        df: `loader.load_csv` の戻り値
-        labels: サンプルごとのクラスタID
-        summaries: `clusterer.summarize_clusters` の戻り値
-        best: `tuner.find_best_clustering` の戻り値
-        input_path: 入力CSVパス（レポート記載用）
-        text_col: 対象テキスト列名（レポート記載用）
-        cluster_names: LLM 等で生成したクラスタID→ラベルのマップ（任意）
-        output_format: "md" / "html" / "both" — レポート形式
+        output_dir: target directory (created if missing)
+        df: `loader.load_csv` result
+        labels: per-row cluster ids
+        summaries: `clusterer.summarize_clusters` result
+        best: `tuner.find_best_clustering` result
+        input_path: input CSV path (embedded in the report)
+        text_col: target text column name (embedded in the report)
+        cluster_names: optional cluster_id -> label mapping
+        cluster_annotations: optional cluster_id -> ClusterAnnotation mapping
+        output_format: "md" / "html" / "both" for the report
     """
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
     annotations = cluster_annotations or {}
 
-    # cluster_names が明示指定された場合はそれを優先、
-    # そうでなければ annotations から label を抽出
+    # Explicit cluster_names wins; otherwise derive from annotations.
     if cluster_names:
         names = cluster_names
     else:
         names = {cid: ann.label for cid, ann in annotations.items()}
 
-    # 常に出力（機械可読）
-    # 元ファイル名をプレフィックスにして <元ファイル名>_classified.csv を生成
+    # Always-written machine-readable artifacts.
     input_stem = Path(str(input_path)).stem
     _write_classified_rows_csv(
         output_dir / f"{input_stem}_classified.csv", df, labels, names
@@ -116,7 +117,7 @@ def write_report(
     )
     _write_params_json(output_dir / "params.json", best, input_path, text_col, names)
 
-    # Markdown 文字列を生成（両形式で共通利用）
+    # Markdown body for both clustering and parameter-search reports.
     clustering_md = _build_clustering_report_md(
         df=df, summaries=summaries, best=best,
         input_path=input_path, text_col=text_col,
@@ -129,31 +130,30 @@ def write_report(
     want_md = output_format in ("md", "both")
     want_html = output_format in ("html", "both")
 
-    # クラスタリング結果レポート: format 設定に従って md / html を生成
+    # Clustering result: toggle md/html per `--format`.
     if want_md:
         (output_dir / "report.md").write_text(clustering_md, encoding="utf-8")
     if want_html:
         _write_html(
             output_dir / "report.html",
             clustering_md,
-            "クラスタリング結果レポート",
+            "Clustering Result Report",
         )
 
-    # パラメータ探索レポート: HTML のみ常時生成（グラフを埋め込むため）
-    # md は廃止（テキストで試行詳細を追うよりも視覚的な比較が有用）
+    # Parameter-search: always HTML-only (so we can embed the SVG chart).
     chart_svg = _build_parameter_search_chart_svg(best)
     _write_html(
         output_dir / "parameter_search.html",
         parameter_search_md,
-        "パラメータ探索レポート",
+        "Parameter Search Report",
         body_prefix=chart_svg,
     )
 
-    logger.info("レポート出力完了: %s (format=%s)", output_dir, output_format)
+    logger.info("Report written: %s (format=%s)", output_dir, output_format)
 
 
 # ---------------------------------------------------------------------------
-# clusters.csv / params.json
+# CSV writers
 # ---------------------------------------------------------------------------
 
 
@@ -163,17 +163,17 @@ def _write_classified_rows_csv(
     labels: np.ndarray,
     cluster_names: dict[int, str],
 ) -> None:
-    """入力DataFrameに cluster_id / cluster_name を付けて保存.
+    """Write the original DataFrame annotated with cluster_id / cluster_name.
 
-    元ファイル名を手がかりにして `<元ファイル名>_classified.csv` として保存することで、
-    入力ごとに判別しやすくする（`clusters.csv` と混同しにくい命名）.
+    The `<input>_classified.csv` naming keeps multiple runs distinguishable when
+    viewing several datasets side by side.
     """
     out = df.copy()
     out["cluster_id"] = labels
     if cluster_names:
         out["cluster_name"] = [cluster_names.get(int(cid), "") for cid in labels]
     out.to_csv(path, index=False, encoding="utf-8-sig")
-    logger.debug("%s 保存: %d 行", path.name, len(out))
+    logger.debug("%s written: %d rows", path.name, len(out))
 
 
 def _write_cluster_list_csv(
@@ -182,17 +182,17 @@ def _write_cluster_list_csv(
     cluster_names: dict[int, str],
     annotations: dict[int, ClusterAnnotation] | None = None,
 ) -> None:
-    """クラスタ1件=1行のサマリ CSV を保存.
+    """Write the cluster-summary CSV (one row per cluster).
 
-    列:
+    Columns:
         cluster_id, cluster_name, size, summary, rep_1, rep_2, ..., rep_N
 
-    - summary: LLM 生成の要約テキスト（--name-clusters 指定時のみ、なければ空列）
-    - rep_1..N: 重心付近の実データ（検証用）
+    - `summary`: LLM-generated summary (only present when annotations exist)
+    - `rep_1..N`: raw rows closest to the centroid (verification data)
 
-    ソート規則:
-        1. ノイズ（cluster_id == -1）は末尾
-        2. それ以外はサイズ降順
+    Sort order:
+        1. Non-noise clusters sorted by descending size.
+        2. Noise (cluster_id == -1) is appended at the end.
     """
     annotations = annotations or {}
     max_reps = max(
@@ -208,7 +208,7 @@ def _write_cluster_list_csv(
     noise = [s for s in summaries if s.cluster_id == NOISE_LABEL]
     ordered = non_noise + noise
 
-    # summary 列は annotations がある場合のみ追加
+    # The summary column only appears when annotations are available.
     has_summaries = bool(annotations)
     columns = ["cluster_id", "cluster_name", "size"]
     if has_summaries:
@@ -219,7 +219,7 @@ def _write_cluster_list_csv(
     for summary in ordered:
         name = cluster_names.get(summary.cluster_id, "")
         if summary.cluster_id == NOISE_LABEL and not name:
-            name = "未分類"
+            name = "Unassigned"
 
         row: dict[str, object] = {
             "cluster_id": int(summary.cluster_id),
@@ -240,7 +240,7 @@ def _write_cluster_list_csv(
 
     df = pd.DataFrame(rows, columns=columns)
     df.to_csv(path, index=False, encoding="utf-8-sig")
-    logger.debug("%s 保存: %d クラスタ", path.name, len(df))
+    logger.debug("%s written: %d clusters", path.name, len(df))
 
 
 def _write_params_json(
@@ -250,7 +250,7 @@ def _write_params_json(
     text_col: str,
     cluster_names: dict[int, str],
 ) -> None:
-    """採用パラメータ・スコアをJSON化."""
+    """Write the machine-readable params/metadata JSON."""
     payload: dict[str, Any] = {
         "input": str(input_path),
         "text_col": text_col,
@@ -284,7 +284,7 @@ def _write_params_json(
 
 
 # ---------------------------------------------------------------------------
-# report.md — 採用結果のみを読みやすく
+# Clustering result report (Markdown body)
 # ---------------------------------------------------------------------------
 
 
@@ -297,52 +297,54 @@ def _build_clustering_report_md(
     cluster_names: dict[int, str],
     cluster_annotations: dict[int, ClusterAnnotation] | None = None,
 ) -> str:
-    """クラスタリング結果レポートの Markdown 文字列を生成.
+    """Build the Markdown body for the clustering result report.
 
-    各クラスタの表示:
-        annotations がある場合:
-            - メイン代表テキスト: LLM 生成の summary
-            - 折りたたみ内: 重心付近の 5 件（検証用）
-        annotations がない場合:
-            - 従来通り 5 件をそのまま列挙
+    Per-cluster layout:
+        - Heading with cluster id, label, and size.
+        - "Representative Text" — the LLM summary when annotations exist,
+          otherwise an explanatory placeholder.
+        - "Raw data near centroid (N items)" — always visible verification data.
     """
     annotations = cluster_annotations or {}
     lines: list[str] = []
-    lines.append("# クラスタリング結果レポート")
+    lines.append("# Clustering Result Report")
     lines.append("")
 
-    # 品質警告（poor の場合は冒頭に目立つ形で）
+    # Loud warning for poor quality scores.
     if best.quality_flag == "poor":
-        lines.append("> ⚠️ **シルエットスコアが低めです（再検討推奨）**")
+        lines.append("> ⚠️ **Silhouette score is low — review recommended.**")
         lines.append(">")
-        lines.append("> データの性質上、明瞭なクラスタ構造が得られていない可能性があります.")
-        lines.append("> パラメータ探索の詳細は `parameter_search.md` を参照してください.")
+        lines.append(
+            "> The data may not have a clear cluster structure. See "
+            "`parameter_search.html` for the full sweep details."
+        )
         lines.append("")
 
-    # サマリテーブル
-    lines.append("## 概要")
+    # Summary table.
+    lines.append("## Summary")
     lines.append("")
-    lines.append("| 項目 | 値 |")
+    lines.append("| Item | Value |")
     lines.append("|---|---|")
-    lines.append(f"| 入力 | `{input_path}` |")
-    lines.append(f"| テキスト列 | `{text_col}` |")
-    lines.append(f"| 有効サンプル数 | {len(df)} |")
-    lines.append(f"| 採用アルゴリズム | **{best.algorithm}** |")
-    lines.append(f"| パラメータ | `{_format_params(best.params)}` |")
+    lines.append(f"| Input | `{input_path}` |")
+    lines.append(f"| Text column | `{text_col}` |")
+    lines.append(f"| Effective rows | {len(df)} |")
+    lines.append(f"| Chosen algorithm | **{best.algorithm}** |")
+    lines.append(f"| Parameters | `{_format_params(best.params)}` |")
     lines.append(
-        f"| シルエットスコア | **{best.silhouette:.4f}** ({QUALITY_LABEL[best.quality_flag]}) |"
+        f"| Silhouette score | **{best.silhouette:.4f}** "
+        f"({QUALITY_LABEL[best.quality_flag]}) |"
     )
-    lines.append(f"| クラスタ数 | {best.n_clusters} |")
-    lines.append(f"| ノイズ件数 | {best.n_noise} |")
+    lines.append(f"| Cluster count | {best.n_clusters} |")
+    lines.append(f"| Noise count | {best.n_noise} |")
     lines.append("")
     lines.append(
-        "探索過程の詳細（全候補・採用/除外理由）は "
-        "[`parameter_search.md`](parameter_search.md) を参照."
+        "See [`parameter_search.html`](parameter_search.html) for the full "
+        "search log (all candidates with selection / rejection reasoning)."
     )
     lines.append("")
 
-    # クラスタ別詳細
-    lines.append("## クラスタ詳細")
+    # Per-cluster detail.
+    lines.append("## Cluster Detail")
     lines.append("")
 
     non_noise = [s for s in summaries if s.cluster_id != NOISE_LABEL]
@@ -351,34 +353,34 @@ def _build_clustering_report_md(
     for summary in non_noise:
         name = cluster_names.get(summary.cluster_id)
         heading = (
-            f"### クラスタ #{summary.cluster_id}: {name}（{summary.size}件）"
+            f"### Cluster #{summary.cluster_id}: {name} ({summary.size} rows)"
             if name
-            else f"### クラスタ #{summary.cluster_id}（{summary.size}件）"
+            else f"### Cluster #{summary.cluster_id} ({summary.size} rows)"
         )
         lines.append(heading)
         lines.append("")
 
         if not summary.representative_texts:
-            lines.append("_代表テキストなし_")
+            lines.append("_No representative text available._")
             lines.append("")
             continue
 
-        # 代表テキスト: 要約が利用可能ならそれを、なければ「要約未生成」を明示
+        # Representative text: summary if available, otherwise explanatory placeholder.
         annotation = annotations.get(summary.cluster_id)
-        lines.append("**代表テキスト:**")
+        lines.append("**Representative text:**")
         lines.append("")
         if annotation and annotation.summary:
             lines.append(annotation.summary)
         else:
             lines.append(
-                "_（要約未生成. `--name-clusters` を付けて再実行すると "
-                "LLM による要約が得られます）_"
+                "_(No summary generated. Re-run with `--name-clusters` to "
+                "enable LLM summarisation.)_"
             )
         lines.append("")
 
-        # 5 件の生データは常に見える形で並べる（検証用）
+        # The raw near-centroid items stay visible as verification data.
         lines.append(
-            f"**重心に近い実データ（{len(summary.representative_texts)}件）:**"
+            f"**Raw data near centroid ({len(summary.representative_texts)} items):**"
         )
         lines.append("")
         for idx, text in enumerate(summary.representative_texts, start=1):
@@ -388,19 +390,22 @@ def _build_clustering_report_md(
             lines.append(f"{idx}. {display}")
         lines.append("")
 
-    # ノイズ
+    # Noise.
     noise_summary = next((s for s in summaries if s.cluster_id == NOISE_LABEL), None)
     if noise_summary and noise_summary.size > 0:
-        lines.append(f"### 未分類（ノイズ・{noise_summary.size}件）")
+        lines.append(f"### Unassigned (noise · {noise_summary.size} rows)")
         lines.append("")
-        lines.append("密度の低い領域に位置し、いずれのクラスタにも属さなかったサンプルです.")
+        lines.append(
+            "Samples that fell in low-density regions and were not assigned "
+            "to any cluster."
+        )
         lines.append("")
 
     return "\n".join(lines)
 
 
 # ---------------------------------------------------------------------------
-# parameter_search.md — 探索全貌と採用根拠
+# Parameter search report (Markdown body)
 # ---------------------------------------------------------------------------
 
 
@@ -409,44 +414,50 @@ def _build_parameter_search_md(
     input_path: Path | str,
     text_col: str,
 ) -> str:
-    """パラメータ探索レポートの Markdown 文字列を生成."""
+    """Build the Markdown body for the parameter search report."""
     lines: list[str] = []
-    lines.append("# パラメータ探索レポート")
+    lines.append("# Parameter Search Report")
     lines.append("")
 
-    # 探索条件
-    lines.append("## 探索条件")
+    # Conditions.
+    lines.append("## Search Conditions")
     lines.append("")
-    lines.append("| 項目 | 値 |")
+    lines.append("| Item | Value |")
     lines.append("|---|---|")
-    lines.append(f"| 入力 | `{input_path}` |")
-    lines.append(f"| テキスト列 | `{text_col}` |")
-    lines.append(f"| スイープサンプル数 | {best.sweep_sample_size} |")
+    lines.append(f"| Input | `{input_path}` |")
+    lines.append(f"| Text column | `{text_col}` |")
+    lines.append(f"| Sweep sample size | {best.sweep_sample_size} |")
     pca_summary = (
-        f"PCA {best.dim_before_pca} → {best.dim_after_pca} 次元"
+        f"PCA {best.dim_before_pca} → {best.dim_after_pca} dims"
         if best.dim_before_pca != best.dim_after_pca
-        else f"削減なし（{best.dim_before_pca} 次元）"
+        else f"no reduction ({best.dim_before_pca} dims)"
     )
-    lines.append(f"| 次元削減 | {pca_summary} |")
-    lines.append(f"| ノイズ率フィルタ | 候補のノイズ率 > {best.max_noise_ratio * 100:.0f}% は除外 |")
+    lines.append(f"| Dimensionality reduction | {pca_summary} |")
+    lines.append(
+        f"| Noise-ratio filter | drop candidates with noise > "
+        f"{best.max_noise_ratio * 100:.0f}% |"
+    )
     lines.append("")
 
-    # 採用結果と理由
-    lines.append("## 採用結果")
+    # Selected configuration.
+    lines.append("## Selected Configuration")
     lines.append("")
-    lines.append(f"- **アルゴリズム**: {best.algorithm}")
-    lines.append(f"- **パラメータ**: `{_format_params(best.params)}`")
-    lines.append(f"- **最終シルエットスコア**: {best.silhouette:.4f} ({QUALITY_LABEL[best.quality_flag]})")
-    lines.append(f"- **クラスタ数**: {best.n_clusters}")
-    lines.append(f"- **ノイズ件数**: {best.n_noise}")
+    lines.append(f"- **Algorithm**: {best.algorithm}")
+    lines.append(f"- **Parameters**: `{_format_params(best.params)}`")
+    lines.append(
+        f"- **Final silhouette score**: {best.silhouette:.4f} "
+        f"({QUALITY_LABEL[best.quality_flag]})"
+    )
+    lines.append(f"- **Cluster count**: {best.n_clusters}")
+    lines.append(f"- **Noise count**: {best.n_noise}")
     lines.append("")
-    lines.append("**採用理由**:")
+    lines.append("**Why this one:**")
     lines.append("")
-    lines.append("1. スイープで得たシルエットスコアが、ノイズ率フィルタを通過した候補中で最大")
-    lines.append("2. フルデータでの再適用後も意味のあるクラスタ構造を保持")
+    lines.append("1. Highest sample silhouette among candidates passing the noise filter.")
+    lines.append("2. The configuration still holds up when re-run on the full data.")
     lines.append("")
 
-    # 全候補を採用フィルタ適用結果別に分類
+    # Classify all candidates.
     sample_size = best.sweep_sample_size or 1
     accepted: list[dict[str, Any]] = []
     rejected_noise: list[dict[str, Any]] = []
@@ -462,68 +473,80 @@ def _build_parameter_search_md(
         else:
             accepted.append(enriched)
 
-    # 採用候補ランキング
+    # Accepted candidate ranking.
     accepted.sort(key=lambda t: t["silhouette"], reverse=True)
-    lines.append("## 採用候補ランキング")
+    lines.append("## Accepted Candidates (Ranked)")
     lines.append("")
     if not accepted:
-        lines.append("_フィルタ通過候補なし_")
+        lines.append("_No candidates passed the filters._")
         lines.append("")
     else:
-        lines.append("| 順位 | 手法 | パラメータ | クラスタ | ノイズ (率) | シルエット | 判定 |")
+        lines.append(
+            "| Rank | Method | Parameters | Clusters | Noise (ratio) "
+            "| Silhouette | Status |"
+        )
         lines.append("|---:|---|---|---:|---|---:|:---:|")
         winner_key = (best.algorithm, _freeze_params(best.params))
         for rank, trial in enumerate(accepted, start=1):
             key = (trial["algorithm"], _freeze_params(trial["params"]))
-            marker = "✓ 採用" if key == winner_key else "—"
+            marker = "✓ Selected" if key == winner_key else "—"
             noise_str = f"{trial['n_noise']} ({trial['noise_ratio'] * 100:.1f}%)"
             lines.append(
-                f"| {rank} | {trial['algorithm']} | `{_format_params(trial['params'])}` "
+                f"| {rank} | {trial['algorithm']} | "
+                f"`{_format_params(trial['params'])}` "
                 f"| {trial['n_clusters']} | {noise_str} "
                 f"| {trial['silhouette']:.4f} | {marker} |"
             )
         lines.append("")
 
-    # フィルタ除外（ノイズ率超過）
+    # Rejected: noise ratio over threshold.
     if rejected_noise:
         rejected_noise.sort(key=lambda t: t["silhouette"], reverse=True)
-        lines.append("## 除外: ノイズ率フィルタ")
+        lines.append("## Rejected — Noise-Ratio Filter")
         lines.append("")
         lines.append(
-            f"サンプル中のノイズ割合が {best.max_noise_ratio * 100:.0f}% を超えたため、"
-            "高スコアでも実用性なしと判定."
+            f"Candidates with sample-noise over "
+            f"{best.max_noise_ratio * 100:.0f}% are dropped even if the score "
+            "looks high; a handful of tiny clusters surrounded by noise has "
+            "no operational value."
         )
         lines.append("")
-        lines.append("| 手法 | パラメータ | クラスタ | ノイズ (率) | シルエット |")
+        lines.append(
+            "| Method | Parameters | Clusters | Noise (ratio) | Silhouette |"
+        )
         lines.append("|---|---|---:|---|---:|")
         for trial in rejected_noise:
             noise_str = f"{trial['n_noise']} ({trial['noise_ratio'] * 100:.1f}%)"
             lines.append(
-                f"| {trial['algorithm']} | `{_format_params(trial['params'])}` "
-                f"| {trial['n_clusters']} | {noise_str} | {trial['silhouette']:.4f} |"
+                f"| {trial['algorithm']} | "
+                f"`{_format_params(trial['params'])}` "
+                f"| {trial['n_clusters']} | {noise_str} "
+                f"| {trial['silhouette']:.4f} |"
             )
         lines.append("")
 
-    # 除外（退化: クラスタ不足やスコア計算不可）
+    # Rejected: degenerate (fewer than 2 clusters or no silhouette).
     if rejected_degenerate:
-        lines.append("## 除外: クラスタ構造が成立せず")
+        lines.append("## Rejected — No Cluster Structure")
         lines.append("")
         lines.append(
-            "有効クラスタが 2 未満、またはシルエット計算が成立しなかった候補."
+            "Candidates that produced fewer than two valid clusters or "
+            "could not be scored."
         )
         lines.append("")
-        lines.append("| 手法 | パラメータ | クラスタ | ノイズ (率) |")
+        lines.append("| Method | Parameters | Clusters | Noise (ratio) |")
         lines.append("|---|---|---:|---|")
         for trial in rejected_degenerate:
             noise_str = f"{trial['n_noise']} ({trial['noise_ratio'] * 100:.1f}%)"
             lines.append(
-                f"| {trial['algorithm']} | `{_format_params(trial['params'])}` "
+                f"| {trial['algorithm']} | "
+                f"`{_format_params(trial['params'])}` "
                 f"| {trial['n_clusters']} | {noise_str} |"
             )
         lines.append("")
 
-    # 手法別ダイジェスト
-    lines.append("## 手法別のスコア推移")
+    # Per-method digest.
+    lines.append("## Score Progression by Method")
     lines.append("")
     for algo in ("kmeans", "dbscan", "hdbscan"):
         algo_trials = [t for t in best.all_trials if t["algorithm"] == algo]
@@ -531,7 +554,7 @@ def _build_parameter_search_md(
             continue
         lines.append(f"### {algo}")
         lines.append("")
-        lines.append("| パラメータ | クラスタ | ノイズ | シルエット |")
+        lines.append("| Parameters | Clusters | Noise | Silhouette |")
         lines.append("|---|---:|---:|---:|")
         for trial in algo_trials:
             score = trial["silhouette"]
@@ -546,7 +569,7 @@ def _build_parameter_search_md(
 
 
 # ---------------------------------------------------------------------------
-# HTML 生成
+# HTML generation
 # ---------------------------------------------------------------------------
 
 
@@ -556,13 +579,13 @@ def _write_html(
     title: str,
     body_prefix: str = "",
 ) -> None:
-    """Markdown を HTML に変換してファイル保存.
+    """Convert Markdown to HTML and persist the file.
 
     Args:
-        path: 出力ファイル
-        md_content: Markdown 本文
-        title: `<title>` 要素と既定の見出し
-        body_prefix: Markdown 変換結果の手前に挿入する追加 HTML（グラフ等）
+        path: target file
+        md_content: Markdown body
+        title: <title> tag contents (used by browsers and as OG title)
+        body_prefix: HTML inserted before the converted Markdown (e.g. a chart)
     """
     import markdown as _md
 
@@ -575,10 +598,10 @@ def _write_html(
 
 
 def _wrap_html(body_html: str, title: str, body_prefix: str = "") -> str:
-    """`<html>` シェルで包む. CSS はインラインで埋め込む（配布容易性重視）."""
+    """Wrap the body in the HTML shell with inline CSS."""
     return (
         "<!DOCTYPE html>\n"
-        "<html lang=\"ja\">\n"
+        "<html lang=\"en\">\n"
         "<head>\n"
         "<meta charset=\"UTF-8\">\n"
         f"<title>{_escape_html(title)}</title>\n"
@@ -593,55 +616,63 @@ def _wrap_html(body_html: str, title: str, body_prefix: str = "") -> str:
     )
 
 
+def _escape_html(text: str) -> str:
+    """Minimal HTML escaping for the <title> element."""
+    return (
+        text.replace("&", "&amp;")
+        .replace("<", "&lt;")
+        .replace(">", "&gt;")
+    )
+
+
 # ---------------------------------------------------------------------------
 # Parameter search chart (inline SVG, zero-dependency)
 # ---------------------------------------------------------------------------
 
 
 def _build_parameter_search_chart_svg(best: BestConfig) -> str:
-    """パラメータ探索結果を SVG の 2軸グラフで描画.
+    """Render the sweep result as a dual-axis SVG chart.
 
-    - X軸: 試行（シルエットスコア降順でランク順に並べる）
-    - Y1軸（左・棒）: シルエットスコア
-    - Y2軸（右・折れ線）: 有効クラスタ数
-    - 棒グラフの上には順位番号（1, 2, ...）を表示
-    - シルエットが算出できなかった試行は除外
-    - 採用候補は棒を強調色で描画
+    - X axis: trials ranked by descending silhouette.
+    - Y1 (left, bars): silhouette score.
+    - Y2 (right, line): number of valid clusters.
+    - Rank number is printed above each bar.
+    - Trials without a computable silhouette are skipped.
+    - The selected candidate's bar is highlighted.
     """
     valid = [t for t in best.all_trials if t["silhouette"] is not None]
     if not valid:
         return ""
 
-    # スコア降順で順位付け
+    # Rank by descending silhouette.
     valid.sort(key=lambda t: t["silhouette"], reverse=True)
     n = len(valid)
 
-    # キャンバス寸法
+    # Canvas dimensions.
     width = 900
     height = 420
     margin_l, margin_r, margin_t, margin_b = 70, 70, 36, 90
     chart_w = width - margin_l - margin_r
     chart_h = height - margin_t - margin_b
 
-    # スコアスケール: 負の値も扱えるよう 0 を原点に含める
+    # Silhouette scale: include 0 when negatives exist.
     max_sil = max(t["silhouette"] for t in valid)
     min_sil = min(0.0, min(t["silhouette"] for t in valid))
-    # 表示余白を上 10% 足す
     sil_top = max(max_sil * 1.1, 0.05)
     sil_bottom = min_sil
 
-    # クラスタ数スケール
+    # Cluster-count scale.
     max_clusters = max(t["n_clusters"] for t in valid)
     cluster_top = max(max_clusters * 1.1, 1)
 
-    # 棒グラフ配置
+    # Bar layout.
     bar_slot = chart_w / n
     bar_w = bar_slot * 0.7
 
-    # 採用候補の特定
+    # Identify the selected candidate for highlighting.
     winner_key = (best.algorithm, _freeze_params(best.params))
 
-    # 色
+    # Colours.
     c_bar = "#4e79a7"
     c_bar_winner = "#f28e2c"
     c_line = "#e15759"
@@ -649,7 +680,6 @@ def _build_parameter_search_chart_svg(best: BestConfig) -> str:
     c_text = "#1f2328"
     c_muted = "#57606a"
 
-    # --- SVG ---
     svg: list[str] = []
     svg.append(
         f'<svg width="100%" viewBox="0 0 {width} {height}" '
@@ -658,46 +688,45 @@ def _build_parameter_search_chart_svg(best: BestConfig) -> str:
         f'font-family:-apple-system,BlinkMacSystemFont,sans-serif;">'
     )
 
-    # 軸の原点をチャート内で計算
     def y_sil(score: float) -> float:
-        """シルエットスコアを y 座標（上から）に変換."""
+        """Map silhouette to a y-coordinate (screen-down)."""
         if sil_top == sil_bottom:
             return margin_t + chart_h
         ratio = (score - sil_bottom) / (sil_top - sil_bottom)
         return margin_t + chart_h * (1 - ratio)
 
     def y_clusters(count: float) -> float:
-        """クラスタ数を y 座標に変換."""
+        """Map cluster count to a y-coordinate."""
         if cluster_top == 0:
             return margin_t + chart_h
         ratio = count / cluster_top
         return margin_t + chart_h * (1 - ratio)
 
-    # グリッド線（左軸基準で 4 段）
+    # Grid lines at 4 intervals based on the left axis.
     for i in range(5):
         frac = i / 4
         y = margin_t + chart_h * (1 - frac)
         sil_val = sil_bottom + (sil_top - sil_bottom) * frac
         clusters_val = cluster_top * frac
-        # 横グリッド
+        # Horizontal grid line.
         svg.append(
             f'<line x1="{margin_l}" y1="{y:.1f}" x2="{width - margin_r}" '
             f'y2="{y:.1f}" stroke="{c_grid}" stroke-width="1" '
             f'stroke-dasharray="2,2" />'
         )
-        # 左軸ラベル（シルエット）
+        # Left axis label (silhouette).
         svg.append(
             f'<text x="{margin_l - 8}" y="{y + 4:.1f}" text-anchor="end" '
             f'font-size="11" fill="{c_muted}">{sil_val:.2f}</text>'
         )
-        # 右軸ラベル（クラスタ数）
+        # Right axis label (cluster count).
         svg.append(
             f'<text x="{width - margin_r + 8}" y="{y + 4:.1f}" '
             f'text-anchor="start" font-size="11" fill="{c_muted}">'
             f'{int(round(clusters_val))}</text>'
         )
 
-    # ゼロ基準線（スコアが負に入る場合のみ強調）
+    # Emphasised zero line when negatives exist.
     if sil_bottom < 0:
         zero_y = y_sil(0.0)
         svg.append(
@@ -705,7 +734,7 @@ def _build_parameter_search_chart_svg(best: BestConfig) -> str:
             f'y2="{zero_y:.1f}" stroke="{c_muted}" stroke-width="1" />'
         )
 
-    # 軸線
+    # Axes.
     svg.append(
         f'<line x1="{margin_l}" y1="{margin_t}" x2="{margin_l}" '
         f'y2="{margin_t + chart_h}" stroke="{c_text}" stroke-width="1.5" />'
@@ -721,31 +750,29 @@ def _build_parameter_search_chart_svg(best: BestConfig) -> str:
         f'stroke="{c_text}" stroke-width="1.5" />'
     )
 
-    # 軸タイトル
+    # Axis titles.
     svg.append(
         f'<text x="{margin_l - 50}" y="{margin_t + chart_h / 2:.1f}" '
         f'font-size="12" fill="{c_bar}" '
         f'transform="rotate(-90 {margin_l - 50} {margin_t + chart_h / 2:.1f})" '
-        f'text-anchor="middle">シルエットスコア</text>'
+        f'text-anchor="middle">Silhouette score</text>'
     )
     svg.append(
         f'<text x="{width - margin_r + 50}" y="{margin_t + chart_h / 2:.1f}" '
         f'font-size="12" fill="{c_line}" '
         f'transform="rotate(90 {width - margin_r + 50} '
-        f'{margin_t + chart_h / 2:.1f})" text-anchor="middle">クラスタ数</text>'
+        f'{margin_t + chart_h / 2:.1f})" text-anchor="middle">Cluster count</text>'
     )
 
-    # 棒グラフ
+    # Bars.
     zero_y = y_sil(0.0)
     for rank, trial in enumerate(valid, start=1):
         x_center = margin_l + bar_slot * (rank - 0.5)
         x_left = x_center - bar_w / 2
         y_top = y_sil(trial["silhouette"])
-        # スコアが正か負かで向きを決める
         bar_y = min(y_top, zero_y)
         bar_h = abs(y_top - zero_y)
 
-        # 採用候補は強調色
         is_winner = (
             trial["algorithm"],
             _freeze_params(trial["params"]),
@@ -762,14 +789,14 @@ def _build_parameter_search_chart_svg(best: BestConfig) -> str:
             f'noise={trial["n_noise"]})</title>'
             f'</rect>'
         )
-        # 順位番号ラベル（棒の上）
+        # Rank label above the bar.
         label_y = bar_y - 4 if bar_h > 0 else zero_y - 4
         svg.append(
             f'<text x="{x_center:.1f}" y="{label_y:.1f}" '
             f'text-anchor="middle" font-size="10" fill="{c_text}">{rank}</text>'
         )
 
-    # 折れ線（クラスタ数）
+    # Line series for the cluster count.
     points = []
     for rank, trial in enumerate(valid, start=1):
         x_center = margin_l + bar_slot * (rank - 0.5)
@@ -779,7 +806,7 @@ def _build_parameter_search_chart_svg(best: BestConfig) -> str:
     svg.append(
         f'<path d="{path_d}" fill="none" stroke="{c_line}" stroke-width="2" />'
     )
-    # 折れ線の各ポイントにマーカー
+    # Markers on each data point.
     for rank, trial in enumerate(valid, start=1):
         x_center = margin_l + bar_slot * (rank - 0.5)
         y = y_clusters(trial["n_clusters"])
@@ -788,7 +815,7 @@ def _build_parameter_search_chart_svg(best: BestConfig) -> str:
             f'fill="{c_line}" />'
         )
 
-    # X 軸ラベル: 手法名を90度回転で縦書き（候補が多いと重なるため）
+    # X-axis labels rotated 45° so they don't overlap.
     for rank, trial in enumerate(valid, start=1):
         x_center = margin_l + bar_slot * (rank - 0.5)
         algo_short = {"kmeans": "KM", "dbscan": "DB", "hdbscan": "HD"}.get(
@@ -802,12 +829,12 @@ def _build_parameter_search_chart_svg(best: BestConfig) -> str:
             f'{margin_t + chart_h + 12:.1f})">{algo_short}:{param_label}</text>'
         )
 
-    # 凡例
+    # Legend.
     legend_y = height - 20
     legend_items = [
-        (margin_l + 10, c_bar, "シルエットスコア（棒・左軸）"),
-        (margin_l + 220, c_bar_winner, "採用候補"),
-        (margin_l + 310, c_line, "クラスタ数（折れ線・右軸）"),
+        (margin_l + 10, c_bar, "Silhouette (bars, left axis)"),
+        (margin_l + 220, c_bar_winner, "Selected"),
+        (margin_l + 310, c_line, "Cluster count (line, right axis)"),
     ]
     for x, color, label in legend_items:
         svg.append(
@@ -823,25 +850,15 @@ def _build_parameter_search_chart_svg(best: BestConfig) -> str:
 
 
 def _compact_param_label(params: dict[str, Any]) -> str:
-    """軸ラベル用の短いパラメータ表示. 主要キーのみ."""
+    """Short parameter label for axis tick text."""
     if "k" in params:
         return f"k={params['k']}"
     if "eps" in params:
         return f"eps={params['eps']:.2f}"
     if "min_cluster_size" in params:
         return f"mcs={params['min_cluster_size']}"
-    # 最初のキーだけ
     first_key = next(iter(params))
     return f"{first_key}={params[first_key]}"
-
-
-def _escape_html(text: str) -> str:
-    """最小限の HTML エスケープ（title 要素用）."""
-    return (
-        text.replace("&", "&amp;")
-        .replace("<", "&lt;")
-        .replace(">", "&gt;")
-    )
 
 
 # ---------------------------------------------------------------------------
@@ -850,7 +867,7 @@ def _escape_html(text: str) -> str:
 
 
 def _format_params(params: dict[str, Any]) -> str:
-    """`key=value` をカンマ区切りで. 数値は有効桁を抑える."""
+    """Format params as a comma-separated `key=value` string with bounded precision."""
     parts: list[str] = []
     for key, value in params.items():
         if isinstance(value, float):
@@ -861,12 +878,12 @@ def _format_params(params: dict[str, Any]) -> str:
 
 
 def _freeze_params(params: dict[str, Any]) -> tuple:
-    """dict を比較可能な tuple に変換（採用候補特定用）."""
+    """Convert a dict into a hashable tuple (for winner identity comparison)."""
     return tuple(sorted(params.items()))
 
 
 def _safe_float(value: Any) -> float | None:
-    """NaN/None を JSON 安全な None に変換."""
+    """Coerce to float, returning None on NaN/invalid values (safe for JSON)."""
     if value is None:
         return None
     try:

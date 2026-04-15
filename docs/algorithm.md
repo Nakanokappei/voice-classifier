@@ -1,122 +1,136 @@
-# Algorithm — チューニング戦略
+# Algorithm — Tuning Strategy
 
-## 目的
+## Goal
 
-入力テキストの埋め込みに対し、**事前知識なしで** 妥当なクラスタ分割を得る。
-ユーザが手法やパラメータを決め打ちしなくても動作することを優先する。
+Given an embedding matrix with **no prior knowledge** of the right number of
+clusters, produce a reasonable partition. The user should not need to pick the
+algorithm or tune parameters by hand.
 
-設計ベース:
-- CKPS (`Chatbot Knowledge Preparation System`) の `parameter_search.py` — サンプルでのスイープ戦略
-- LLM Topic Modeler の `ClusteringService.swift` — PCA による次元の呪い対策
-
----
-
-## 入力データの前処理
-
-1. **L2 正規化** — 行ごとにユニットベクトル化
-   - コサイン距離と L2 距離が等価になり、`euclidean` メトリックで高速化可能
-   - `||a-b||² = 2 × (1 - cos_sim(a, b))`
-
-2. **PCA 次元削減**（高次元時のみ） — 次元の呪い対策
-   - 入力次元 > 50 の場合のみ発動、目標次元 = 30
-   - 実測: 1,536次元の `text-embedding-3-small` では、素の空間で KMeans シルエット が 0.08〜0.11 しか出ない
-   - PCA 30次元へ削減 + 再L2正規化で、スコアが 0.17〜0.22 まで回復
-   - 定数: `PCA_TARGET_DIM = 30`、`PCA_DIM_THRESHOLD = 50`
-
-> **Why?** 高次元ベクトルでは大半のペアの距離が似た値に集中し（distance concentration）、密度ベース手法が疎密を区別できなくなる。PCA で主成分上位30次元に射影すると、意味的な分散が保持されつつ距離が広がる。
+Design roots:
+- CKPS (`Chatbot Knowledge Preparation System`) `parameter_search.py` — sweep
+  strategy on a small sample.
+- LLM Topic Modeler `ClusteringService.swift` — PCA to combat the curse of
+  dimensionality.
 
 ---
 
-## 2相構成
+## Input Preprocessing
 
-### Phase 1: スイープ（サブサンプル1500件）
+1. **L2 normalisation** — turn every row into a unit vector.
+   - Cosine distance and L2 distance become equivalent, enabling the fast
+     `euclidean` metric downstream.
+   - `||a-b||² = 2 × (1 - cos_sim(a, b))`.
 
-CKPSに倣い、**1,500点のサブサンプル**で全候補をクラスタリングし、シルエット(cosine)を算出。
-O(N²) のシルエット計算が現実時間に収まる上限として 1,500 を採用。
+2. **PCA dimensionality reduction** (only for high-dim inputs) — counter the
+   curse of dimensionality.
+   - Active when the input has more than 50 dimensions; target 30.
+   - Measurements on raw 1,536-d `text-embedding-3-small` show KMeans
+     silhouette stuck at 0.08–0.11.
+   - After PCA-30 + re-normalisation, scores recover to 0.17–0.22.
+   - Constants: `PCA_TARGET_DIM = 30`, `PCA_DIM_THRESHOLD = 50`.
 
-### Phase 2: 勝者設定でフルデータ再実行
-
-スイープで選ばれた (algorithm, params) を **全 N 点に対して再 fit**。
-サブサンプル→全点への「最近傍伝播」は密度系で 80% 以上がノイズ化する病的ケースを引き起こすため、**再 fit を採用**。
+> **Why?** In high-dimensional spaces, most pairwise distances compress into a
+> narrow band (distance concentration), so density-based methods can no longer
+> distinguish dense from sparse regions. Projecting onto the top 30 principal
+> components keeps the semantic variance while spreading distances back out.
 
 ---
 
-## 候補手法
+## Two-Phase Flow
 
-| 手法 | 特徴 | 主要パラメータ |
+### Phase 1: Sweep on a 1,500-point subsample
+
+Following CKPS, run every candidate on a **1,500-point subsample** and score
+each with cosine silhouette. 1,500 is the ceiling where O(n²) silhouette stays
+practical.
+
+### Phase 2: Re-run the winner on the full data
+
+Re-fit the winning `(algorithm, params)` over every row. Nearest-neighbour
+label propagation from a small sample tends to mark 80%+ of the data as noise
+when the sample doesn't span the full manifold, so we refit instead.
+
+---
+
+## Candidate Methods
+
+| Method | Traits | Key parameters |
 |---|---|---|
-| **MiniBatchKMeans** | 指定 K のクラスタに分割、ノイズなし. バッチ学習で高速 | `k` |
-| **DBSCAN** | 密度ベース、ノイズ検出あり. `eps` で密度定義 | `eps`, `min_samples=5` |
-| **HDBSCAN** | 階層型密度ベース、クラスタ数自動 | `min_cluster_size`, `min_samples=5` |
+| **MiniBatchKMeans** | Partitions into K clusters; no noise; fast batches | `k` |
+| **DBSCAN** | Density-based; produces noise; `eps` defines density | `eps`, `min_samples=5` |
+| **HDBSCAN** | Hierarchical density-based; automatic K | `min_cluster_size`, `min_samples=5` |
 
-HDBSCAN は `pip install hdbscan` が必要。失敗時は自動でスキップされる。
+HDBSCAN requires `pip install hdbscan`; when absent it is automatically skipped.
 
-### パラメータグリッド
+### Parameter grids
 
 ```
 K (KMeans):          [2, 3, 5, 7, 10, 15, 20, 30, 50, 80]
-eps (DBSCAN):        [0.25, 0.35, 0.45, 0.55, 0.70]   # L2正規化後の euclidean スケール
+eps (DBSCAN):        [0.25, 0.35, 0.45, 0.55, 0.70]   # scale: L2-normalised euclidean
 min_cluster_size (HDBSCAN): [5, 10, 15, 20, 30, 50, 80, 100]
 ```
 
-CKPS と同じ離散・人間可読グリッド。対数空間でのスイープはスコア変化がなだらかすぎて不要。
+Same discrete human-readable grids as CKPS. A log-scaled sweep adds little
+signal for these metrics.
 
 ---
 
-## 評価指標
+## Scoring
 
-### Primary: シルエットスコア (cosine)
+### Primary: cosine silhouette
 
 ```python
 silhouette_score(sample, labels, metric="cosine")
 ```
 
-- 範囲 `[-1, 1]`、高いほど良い
-- ノイズ (`label == -1`) は計算対象から除外
-- 有効クラスタ < 2 の場合は `None` で候補から除外
+- Range `[-1, 1]`; higher is better.
+- Noise (`label == -1`) is excluded from the calculation.
+- Fewer than 2 valid clusters → `None`, candidate dropped.
 
-### 実用性フィルタ
+### Usability filter
 
-シルエットが高くても「サンプル1500中 1489件がノイズ、残り 11 点で 2 クラスタ」のような結果は実用的でない。以下で自動除外:
+A high silhouette doesn't imply usefulness: "6 tiny clusters amid 1,489 noise
+points" can still score 0.89. We drop such candidates:
 
 ```
 noise_ratio = n_noise / sample_size
-noise_ratio > MAX_NOISE_RATIO_FOR_SELECTION (=0.5) の候補は除外
+candidates with noise_ratio > MAX_NOISE_RATIO_FOR_SELECTION (=0.5) are dropped
 ```
 
-フィルタ後に候補が 0 の場合はフィルタを緩めて再選択（ログに WARNING）。
+If nothing passes the filter, relax it and emit a warning.
 
 ---
 
-## スコア閾値と品質ラベル
+## Quality Thresholds
 
-| final silhouette | 品質ラベル | レポート表現 |
+| final silhouette | Quality flag | Report label |
 |---|---|---|
-| `≥ 0.40` | good | 良好 |
-| `0.20 – 0.40` | warn | 許容（注意） |
-| `< 0.20` | poor | 要再検討（冒頭に大きく警告） |
+| `≥ 0.40` | good | Good |
+| `0.20 – 0.40` | warn | Acceptable (with caveats) |
+| `< 0.20` | poor | Needs review (prominent warning banner) |
 
-テキスト埋め込みの性質上、生データで 0.4 を超えるのは例外的。0.2 前後で実用的なクラスタリングは十分得られる（実データで確認済み）。
-
----
-
-## 再現性
-
-- `random_state = 42` を全乱数に適用
-- サブサンプリング、PCA、MiniBatchKMeans すべて同一種
-- 同入力・同モデルなら決定的
+For text embeddings, scores above 0.4 on raw data are rare. 0.2-ish is already
+a practically useful clustering (confirmed on real datasets).
 
 ---
 
-## 実測例（24,693行の修理受付データ → 14,084件ユニーク）
+## Reproducibility
+
+- `random_state = 42` for every RNG.
+- The same seed controls subsampling, PCA, and MiniBatchKMeans initialisation.
+- Same input + same model ⇒ deterministic output.
+
+---
+
+## Real-World Example (24,693 repair intake rows → 14,084 unique)
 
 ```
-採用:    KMeans k=10
-スコア:  0.2272 (warn)
-クラスタ: 10, ノイズ 0
-実行時間: 2.6秒（埋め込みキャッシュヒット時）
+Selected:      KMeans k=10
+Score:         0.2272 (warn)
+Clusters:      10, Noise: 0
+Runtime:       2.6 s with warm embedding cache
 
-(採用されなかった候補:)
-  DBSCAN eps=0.35 → sample_sil=0.865 だが noise 97% でフィルタ除外
-  HDBSCAN mcs=30  → sample_sil=0.370 だが noise 52% で当落線上
+(Rejected candidates:)
+  DBSCAN eps=0.35 → sample_sil=0.865 but 97% noise → filtered out
+  HDBSCAN mcs=30  → sample_sil=0.370 but 52% noise → borderline
 ```

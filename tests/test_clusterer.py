@@ -1,4 +1,4 @@
-"""clusterer モジュールのテスト."""
+"""Tests for the clusterer module."""
 
 from __future__ import annotations
 
@@ -11,17 +11,17 @@ from src import clusterer
 def test_summarize_picks_centroid_closest_texts() -> None:
     """各クラスタで重心に近い順に代表テキストが返ること.
 
-    注: L2正規化後の重心は角度平均に近いため、対称に散らしたサンプルの
-    中央値（= 重心方向）を "close" として配置している.
+    Note: after L2 normalisation, the centroid approximates the angular mean,
+    so the axis-aligned point is the one closest to the centroid.
     """
-    # 2 クラスタ: [1,0] 方向系と [0,1] 方向系（+y/-y に対称に散らす）
+    # Two clusters around [1,0] and [0,1], symmetric around +y/-y
     vectors = np.array(
         [
-            # cluster 0 — 角度平均が [1, 0] 方向になる対称配置
-            [1.0, 0.0],      # 重心方向（= 一番近い）
-            [1.0, 0.3],      # +y 側
-            [1.0, -0.3],     # -y 側（対称に相殺）
-            # cluster 1 — 角度平均が [0, 1] 方向になる対称配置
+            # cluster 0 — arranged so the angular mean points to [1, 0]
+            [1.0, 0.0],      # Centroid direction (nearest)
+            [1.0, 0.3],      # +y side
+            [1.0, -0.3],     # -y side (cancels out)
+            # cluster 1 — same but pointing to [0, 1]
             [0.0, 1.0],
             [0.3, 1.0],
             [-0.3, 1.0],
@@ -48,20 +48,20 @@ def test_summarize_picks_centroid_closest_texts() -> None:
     assert summaries[0].cluster_id == 0
     assert summaries[1].cluster_id == 1
 
-    # 重心方向の "center" が 1 位で選ばれる
+    # The axis-aligned "center" ranks first
     assert summaries[0].representative_texts[0] == "c0 center"
     assert summaries[1].representative_texts[0] == "c1 center"
     assert len(summaries[0].representative_texts) == 2
 
 
 def test_noise_cluster_is_appended_at_end_without_reps() -> None:
-    """ノイズクラスタは末尾で、代表テキストは空."""
+    """Noise clusters go to the tail with no representatives."""
     vectors = np.array(
         [
             [1.0, 0.0],
             [1.0, 0.1],
             [0.0, 1.0],
-            [0.5, 0.5],  # これだけノイズ
+            [0.5, 0.5],  # only this point is noise
         ],
         dtype=np.float32,
     )
@@ -78,7 +78,7 @@ def test_noise_cluster_is_appended_at_end_without_reps() -> None:
 
 
 def test_shape_mismatch_raises() -> None:
-    """行数が一致しない場合は ValueError."""
+    """Mismatched row counts raise ValueError."""
     df = pd.DataFrame({"_normalized_text": ["a", "b"]})
     vectors = np.zeros((3, 2), dtype=np.float32)
     labels = np.array([0, 0, 0])
@@ -86,6 +86,6 @@ def test_shape_mismatch_raises() -> None:
     try:
         clusterer.summarize_clusters(df, vectors, labels)
     except ValueError as exc:
-        assert "行数不整合" in str(exc)
+        assert "Length mismatch" in str(exc)
     else:
-        raise AssertionError("ValueError が送出されませんでした")
+        raise AssertionError("Expected ValueError was not raised")

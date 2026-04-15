@@ -1,8 +1,8 @@
-"""クラスタリング結果の後処理 — 代表テキストの抽出.
+"""Post-processing of clustering results — representative text extraction.
 
-責務:
-    - 各クラスタの重心を算出し、重心に近い上位 N 件を代表として選ぶ
-    - ノイズラベル（-1）は「未分類」としてまとめる
+Responsibilities:
+    - Compute each cluster's centroid and pick the top-N rows closest to it.
+    - Noise labels (-1) are grouped as "unassigned" without representative picks.
 """
 
 from __future__ import annotations
@@ -20,13 +20,13 @@ NOISE_LABEL: int = -1
 
 @dataclass
 class ClusterSummary:
-    """単一クラスタのサマリ情報.
+    """Per-cluster summary.
 
     Attributes:
-        cluster_id: クラスタID（ノイズは -1）
-        size: クラスタ内のサンプル数
-        representative_indices: 重心に近い順のインデックス（`df` 行番号基準）
-        representative_texts: 代表テキスト（正規化後）
+        cluster_id: cluster id (-1 denotes noise)
+        size: number of samples in the cluster
+        representative_indices: row indices ordered by distance to the centroid
+        representative_texts: corresponding normalised texts
     """
 
     cluster_id: int
@@ -41,28 +41,30 @@ def summarize_clusters(
     labels: np.ndarray,
     top_k: int = 5,
 ) -> list[ClusterSummary]:
-    """各クラスタの代表テキストを抽出してサマリ化.
+    """Produce per-cluster summaries by picking the top-K rows nearest each centroid.
 
     Args:
-        df: `_normalized_text` 列を持つ DataFrame（`labels` と同じ行順）
-        embeddings: shape=(N, D) の埋め込み行列
-        labels: 各サンプルのクラスタID配列 shape=(N,)
-        top_k: 各クラスタから抽出する代表件数
+        df: DataFrame containing `_normalized_text` (row-aligned with `labels`)
+        embeddings: shape (N, D) embedding matrix
+        labels: cluster id for each row, shape (N,)
+        top_k: number of representative rows to pick per cluster
 
     Returns:
-        クラスタIDの昇順に並べた ClusterSummary のリスト. ノイズが存在する場合は末尾に含まれる
+        ClusterSummary list sorted by ascending cluster id; noise (if any) is
+        appended at the end.
     """
     if len(df) != embeddings.shape[0] or len(df) != len(labels):
         raise ValueError(
-            f"行数不整合: df={len(df)} embeddings={embeddings.shape[0]} labels={len(labels)}"
+            f"Length mismatch: df={len(df)} embeddings={embeddings.shape[0]} "
+            f"labels={len(labels)}"
         )
 
-    # 事前に正規化（centroid 計算と cosine 距離で一貫させる）
+    # Normalise up-front so centroid math and cosine distance stay consistent.
     normalized = _l2_normalize(embeddings)
 
     summaries: list[ClusterSummary] = []
     unique_labels = sorted(set(labels.tolist()))
-    # ノイズは末尾にまとめる
+    # Put noise at the tail.
     ordered = [c for c in unique_labels if c != NOISE_LABEL]
     if NOISE_LABEL in unique_labels:
         ordered.append(NOISE_LABEL)
@@ -73,7 +75,7 @@ def summarize_clusters(
         size = int(member_indices.size)
 
         if cluster_id == NOISE_LABEL:
-            # ノイズは代表テキストを選ばず、件数のみ保持
+            # Noise carries no representative picks — only the count.
             summaries.append(
                 ClusterSummary(
                     cluster_id=NOISE_LABEL,
@@ -84,7 +86,7 @@ def summarize_clusters(
             )
             continue
 
-        # 重心に近い上位 top_k を抽出
+        # Pick the top-K rows closest to the centroid.
         rep_indices = _pick_representatives(
             normalized[member_indices], member_indices, top_k
         )
@@ -109,11 +111,10 @@ def summarize_clusters(
 
 
 def _l2_normalize(x: np.ndarray) -> np.ndarray:
-    """行ごとに L2 正規化. ゼロ行は正準基底 `e_0` に置換.
+    """Normalise rows to unit L2 length; replace zero-norm rows with `e_0`.
 
-    tuner._l2_normalize と同一仕様（責務分離のため各モジュールに配置）.
-    下流の `member_vectors @ centroid` で divide-by-zero を踏まないよう、
-    ゼロノルムを根絶する.
+    Mirrors the rule used in `tuner._l2_normalize` so that downstream math
+    (`member_vectors @ centroid`) never encounters divide-by-zero.
     """
     norms = np.linalg.norm(x, axis=1, keepdims=True)
     zero_mask = norms.flatten() == 0
@@ -129,10 +130,10 @@ def _pick_representatives(
     member_indices: np.ndarray,
     top_k: int,
 ) -> list[int]:
-    """クラスタ重心に最も近い上位 top_k のインデックスを返す.
+    """Return the top-K indices closest to the cluster centroid.
 
-    重心は member_vectors の平均を L2 正規化したもの.
-    近さはコサイン類似度の降順（= コサイン距離の昇順）.
+    Centroid = L2-normalised mean of `member_vectors`. Closeness is ranked by
+    descending cosine similarity (equivalent to ascending cosine distance).
     """
     if member_vectors.shape[0] == 0:
         return []
@@ -140,16 +141,16 @@ def _pick_representatives(
     centroid = member_vectors.mean(axis=0)
     centroid_norm = np.linalg.norm(centroid)
     if centroid_norm == 0:
-        # 全ベクトルが相殺するケースは稀. 先頭から返す
+        # Extremely rare: all vectors cancel out. Fall back to input order.
         return member_indices[:top_k].tolist()
     centroid /= centroid_norm
 
-    # member_vectors は _l2_normalize 済みなのでゼロ行は存在しない前提.
-    # ただし数値精度で微小なオーバーフロー等が起きうるため防御的に errstate で抑制
+    # `member_vectors` is already normalised, so zero rows do not occur here.
+    # Guard the matmul against stray numerical noise anyway.
     with np.errstate(divide="ignore", invalid="ignore", over="ignore"):
         similarities = member_vectors @ centroid
 
-    # NaN/Inf が万一混入しても最下位に送る
+    # Push any NaN/Inf to the back of the ranking.
     similarities = np.nan_to_num(
         similarities, nan=-np.inf, posinf=np.inf, neginf=-np.inf
     )

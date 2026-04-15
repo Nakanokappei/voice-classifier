@@ -1,8 +1,8 @@
-"""CLI エントリポイント — loader → embedder → tuner → clusterer → reporter.
+"""CLI entrypoint — runs loader → embedder → tuner → clusterer → (namer) → reporter.
 
-使い方::
+Usage::
 
-    python src/pipeline.py --input data/input/sample.csv --text-col "対応内容"
+    python src/pipeline.py --input data/input/sample.csv --text-col "response_body"
 """
 
 from __future__ import annotations
@@ -18,25 +18,26 @@ from dotenv import load_dotenv
 
 
 def _suppress_known_benign_warnings() -> None:
-    """sklearn 内部で発生する既知良性 RuntimeWarning を抑制する.
+    """Silence known-benign RuntimeWarnings that originate inside sklearn.
 
-    - sklearn.utils.extmath (safe_sparse_dot) の divide/overflow/invalid
-      は randomized SVD や cosine_distances 正規化で発生する数値ノイズで、
-      voice-classifier の演算結果には影響しない
-    - ゼロノルム行は上流で e_0 に置換済みなので意味的な警告は残らない
+    - sklearn.utils.extmath (safe_sparse_dot) occasionally emits divide/overflow/
+      invalid-value warnings from randomised SVD or cosine_distances. They are
+      numerical noise and do not affect results.
+    - With zero-norm rows already replaced by `e_0` upstream, no semantically
+      meaningful warning remains to suppress.
     """
     warnings.filterwarnings(
         "ignore",
         category=RuntimeWarning,
         message=r".*(divide by zero|overflow|invalid value).*matmul.*",
     )
-    # PCA の randomized SVD 内部の類似警告も同メッセージなので上記で拾える
 
 
 _suppress_known_benign_warnings()
 
-# モジュールとして（`python -m src.pipeline`）、またはスクリプトとして（`python src/pipeline.py`）
-# どちらでも動くように import 経路を両対応
+
+# Module imports: run both as a script (`python src/pipeline.py`) and as a
+# module (`python -m src.pipeline`).
 if __package__ in (None, ""):  # pragma: no cover
     sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
     from src import clusterer, embedder, loader, namer, progress, reporter, tuner
@@ -48,46 +49,50 @@ logger = logging.getLogger("voice_classifier")
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
-    """CLI 引数を解析."""
+    """Parse CLI arguments."""
     parser = argparse.ArgumentParser(
-        description="顧客の声 自動分類・洞察レポートシステム",
+        description="Customer-voice auto-classification and insight report system",
     )
     parser.add_argument(
-        "--input", required=True, type=Path, help="入力CSVパス"
+        "--input", required=True, type=Path, help="Input CSV path"
     )
     parser.add_argument(
         "--text-col",
         default=None,
-        help="分類対象テキストの列名. 省略時は対話的に候補から選択",
+        help=(
+            "Single column to embed. When omitted and --text-cols is also "
+            "omitted, candidates are offered interactively."
+        ),
     )
     parser.add_argument(
         "--text-cols",
         default=None,
         help=(
-            "複数列を結合して埋め込み対象にする場合のカンマ区切り列名. "
-            "例: --text-cols 'Ticket Subject,Ticket Description'. "
-            "--text-col と排他."
+            "Comma-separated list of columns to concatenate for embedding. "
+            "Example: --text-cols 'Ticket Subject,Ticket Description'. "
+            "Mutually exclusive with --text-col."
         ),
     )
     parser.add_argument(
         "--column-labels",
         default=None,
         help=(
-            "複数列モード時の列名→ラベル変換. 例: "
-            '--column-labels \'Ticket Subject=subject,Ticket Description=body\''
+            "Optional `column=label` pairs (comma-separated) for multi-column "
+            "mode. Example: --column-labels 'Ticket Subject=subject,"
+            "Ticket Description=body'"
         ),
     )
     parser.add_argument(
         "--output-dir",
         type=Path,
         default=Path("data/output"),
-        help="出力ディレクトリルート（ここにタイムスタンプ付きで作成）",
+        help="Root output directory (per-run subdir added with a timestamp)",
     )
     parser.add_argument(
         "--cache-dir",
         type=Path,
         default=Path("cache"),
-        help="埋め込みキャッシュ保存先",
+        help="Embedding cache directory",
     )
     parser.add_argument(
         "--model",
@@ -95,24 +100,23 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         dest="model",
         default=embedder.DEFAULT_MODEL,
         help=(
-            f"OpenAI 埋め込みモデル名. 既定: {embedder.DEFAULT_MODEL}. "
-            "選択肢例: text-embedding-3-small (既定), text-embedding-3-large, "
-            "text-embedding-ada-002. 次元数とコストが異なるためキャッシュは"
-            "モデル別に保存される"
+            f"OpenAI embedding model. Default: {embedder.DEFAULT_MODEL}. "
+            "Alternatives: text-embedding-3-large, text-embedding-ada-002. "
+            "Cache is segregated per model so switching is safe."
         ),
     )
-    parser.add_argument("--top-k", type=int, default=5, help="代表テキスト抽出件数")
-    parser.add_argument("--min-clusters", type=int, default=2, help="KMeans 下限K")
-    parser.add_argument("--max-clusters", type=int, default=20, help="KMeans 上限K")
+    parser.add_argument("--top-k", type=int, default=5, help="Representative texts per cluster")
+    parser.add_argument("--min-clusters", type=int, default=2, help="Lower bound for K (KMeans)")
+    parser.add_argument("--max-clusters", type=int, default=20, help="Upper bound for K (KMeans)")
     parser.add_argument(
         "--name-clusters",
         action=argparse.BooleanOptionalAction,
         default=True,
         help=(
-            "Generate LLM label and summary for each cluster (default: on). "
-            "Summary is shown as the main representative text; the 5 "
-            "centroid-near raw items are kept as verification data below. "
-            "Disable with --no-name-clusters to skip LLM calls."
+            "Generate an LLM label and summary for each cluster (default: on). "
+            "The summary is shown as the main representative text; the raw "
+            "near-centroid items remain visible below as verification data. "
+            "Disable with --no-name-clusters to skip the extra LLM calls."
         ),
     )
     parser.add_argument(
@@ -121,9 +125,10 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         dest="name_model",
         default=namer.DEFAULT_MODEL,
         help=(
-            f"クラスタ名生成に使う OpenAI Chat モデル. 既定: {namer.DEFAULT_MODEL}. "
-            "GPT-5 系 / o-series / GPT-4o / GPT-3.5 系で API 仕様差があるが、"
-            "namer._build_chat_kwargs が自動吸収する"
+            f"OpenAI chat model used for cluster labelling. Default: "
+            f"{namer.DEFAULT_MODEL}. API-spec differences across GPT-5 / "
+            "o-series / GPT-4o / GPT-3.5 (e.g. max_completion_tokens vs "
+            "max_tokens, temperature restrictions) are absorbed automatically."
         ),
     )
     parser.add_argument(
@@ -131,64 +136,64 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         dest="output_format",
         default="md",
         choices=["md", "html", "both"],
-        help="レポート形式. md (既定), html, both",
+        help="Report format for report.md/html. Default md.",
     )
     parser.add_argument(
         "--log-level",
         default="INFO",
         choices=["DEBUG", "INFO", "WARNING", "ERROR"],
-        help="ログレベル",
+        help="Log level (stderr). run.log always captures INFO+.",
     )
     return parser.parse_args(argv)
 
 
 def run(args: argparse.Namespace) -> Path:
-    """パイプライン本体. 出力先ディレクトリを返す."""
-    # 出力先はタイムスタンプ付きで一意化
+    """Run the pipeline and return the output directory."""
+    # Per-run output directory with a millisecond-unique timestamp.
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     run_dir = args.output_dir / timestamp
     run_dir.mkdir(parents=True, exist_ok=True)
 
     _configure_logging(args.log_level, run_dir / "run.log")
 
-    # 列指定モードの解決
+    # Resolve column selection.
     text_cols, column_labels = _parse_column_specs(args)
     if text_cols:
-        args.text_col = None  # multi-col モード
+        args.text_col = None  # multi-column mode
         display_cols = ", ".join(text_cols)
-        logger.info("複数列モード: %s", display_cols)
+        logger.info("Multi-column mode: %s", display_cols)
     else:
-        # text-col が未指定なら候補を提示して対話的に決定
+        # Interactive prompt if no column is specified.
         text_col = args.text_col or _resolve_text_col_interactively(args.input)
         args.text_col = text_col
         display_cols = text_col
 
-    logger.info("=== voice-classifier 開始 ===")
+    logger.info("=== voice-classifier start ===")
     logger.info("input=%s cols=%s output=%s", args.input, display_cols, run_dir)
 
-    # ネーミングステップを実行するかでフェーズ数が変わる
-    # --name-clusters 指定時: 推定 + 生成 + 重複解消 の 3 ステップ追加
+    # Step counts depend on whether LLM annotation runs.
+    # `--name-clusters`: +3 steps (dataset context, generation, dedup).
     total_steps = 8 if args.name_clusters else 5
     reporter_ui = progress.ProgressReporter(total_steps=total_steps)
     reporter_ui.banner("voice-classifier")
 
-    # Step 1: CSV 読み込み + 正規化
-    with reporter_ui.step("CSVを読み込み・正規化") as step:
-        step.detail(f"入力: {args.input}")
+    # Step 1: Load and normalise CSV.
+    with reporter_ui.step("Load and normalise CSV") as step:
+        step.detail(f"input: {args.input}")
         if text_cols:
-            step.detail(f"複数列結合: {', '.join(text_cols)}")
+            step.detail(f"multi-column: {', '.join(text_cols)}")
             df = loader.load_csv(
                 args.input, text_cols=text_cols, column_labels=column_labels
             )
         else:
-            step.detail(f"テキスト列: {args.text_col}")
+            step.detail(f"text column: {args.text_col}")
             df = loader.load_csv(args.input, text_col=args.text_col)
-        step.set_summary(f"→ {len(df):,}件（重複集約後）")
+        step.set_summary(f"→ {len(df):,} rows (after dedup)")
 
-    # Step 2: 埋め込み取得（キャッシュ優先）
-    with reporter_ui.step("埋め込みベクトルを取得") as step:
+    # Step 2: Fetch embeddings (cache first).
+    with reporter_ui.step("Fetch embeddings") as step:
         texts = df["_normalized_text"].tolist()
-        step.detail(f"モデル: {args.model}")
+        step.detail(f"model: {args.model}")
         embeddings = embedder.get_embeddings(
             texts=texts,
             cache_dir=args.cache_dir,
@@ -198,10 +203,10 @@ def run(args: argparse.Namespace) -> Path:
             f"→ shape={embeddings.shape[0]:,}×{embeddings.shape[1]}"
         )
 
-    # Step 3: 自動チューニング
-    with reporter_ui.step("クラスタリング候補を探索") as step:
+    # Step 3: Clustering sweep and selection.
+    with reporter_ui.step("Search clustering candidates") as step:
         step.detail(
-            f"KMeans/DBSCAN/HDBSCAN を {tuner.SWEEP_SAMPLE_SIZE}件のサンプルで走査"
+            f"KMeans/DBSCAN/HDBSCAN sweep on {tuner.SWEEP_SAMPLE_SIZE} samples"
         )
         best = tuner.find_best_clustering(
             embeddings,
@@ -209,29 +214,29 @@ def run(args: argparse.Namespace) -> Path:
             max_clusters=args.max_clusters,
         )
         step.set_summary(
-            f"→ 採用 {best.algorithm} "
+            f"→ selected {best.algorithm} "
             f"{_format_params_short(best.params)} "
             f"(score={best.silhouette:.4f}, "
             f"clusters={best.n_clusters}, noise={best.n_noise})"
         )
 
-    # Step 4: 代表テキスト抽出
-    with reporter_ui.step("代表テキストを抽出") as step:
+    # Step 4: Extract representative texts.
+    with reporter_ui.step("Extract representative texts") as step:
         summaries = clusterer.summarize_clusters(
             df=df,
             embeddings=embeddings,
             labels=best.labels,
             top_k=args.top_k,
         )
-        step.set_summary(f"→ 各クラスタから上位{args.top_k}件ずつ")
+        step.set_summary(f"→ top-{args.top_k} per cluster")
 
-    # Step 5 (任意): クラスタラベル + 要約を LLM で生成
+    # Step 5 (optional): LLM annotation flow.
     cluster_annotations: dict[int, namer.ClusterAnnotation] = {}
     cluster_names: dict[int, str] = {}
     if args.name_clusters:
-        # 5a. データセットの意味を推定（グラウンディング情報）
-        with reporter_ui.step("データセットの意味を推定") as step:
-            step.detail(f"モデル: {args.name_model}")
+        # 5a. Infer the dataset meaning (grounding context).
+        with reporter_ui.step("Infer dataset context") as step:
+            step.detail(f"model: {args.name_model}")
             dataset_context = namer.infer_dataset_context(
                 texts=df["_normalized_text"].tolist(),
                 model=args.name_model,
@@ -241,9 +246,9 @@ def run(args: argparse.Namespace) -> Path:
                 f"{dataset_context.granularity_hint}"
             )
 
-        # 5b. ラベル+要約を並列生成（グラウンディング注入）
-        with reporter_ui.step("クラスタのラベル+要約を生成") as step:
-            step.detail(f"並列度: {namer.MAX_CONCURRENCY}")
+        # 5b. Generate label + summary in parallel with grounding.
+        with reporter_ui.step("Generate cluster label and summary") as step:
+            step.detail(f"concurrency: {namer.MAX_CONCURRENCY}")
             cluster_annotations = namer.generate_cluster_annotations(
                 summaries=summaries,
                 cache_dir=args.cache_dir,
@@ -255,11 +260,12 @@ def run(args: argparse.Namespace) -> Path:
                 for cid, ann in list(cluster_annotations.items())[:3]
             ]
             step.set_summary(
-                f"→ {len(cluster_annotations)}件 例: {', '.join(preview)}"
+                f"→ {len(cluster_annotations)} clusters, "
+                f"e.g. {', '.join(preview)}"
             )
 
-        # 5c. ラベル重複解消（小さい側を差別化）
-        with reporter_ui.step("ラベル重複を解消") as step:
+        # 5c. Resolve label duplicates.
+        with reporter_ui.step("Resolve label duplicates") as step:
             before = namer._label_frequencies(cluster_annotations)
             duplicates_before = sum(
                 count for count in before.values() if count >= 2
@@ -275,17 +281,16 @@ def run(args: argparse.Namespace) -> Path:
                 count for count in after.values() if count >= 2
             )
             step.set_summary(
-                f"→ 重複 {duplicates_before}件 → {duplicates_after}件"
+                f"→ duplicates: {duplicates_before} → {duplicates_after}"
             )
 
         cluster_names = {
             cid: ann.label for cid, ann in cluster_annotations.items()
         }
 
-    # Final step: レポート出力
-    with reporter_ui.step("レポートを生成") as step:
-        step.detail(f"出力先: {run_dir}")
-        # レポート表示用のテキスト列ラベル（複数列時は結合表示）
+    # Final step: write reports.
+    with reporter_ui.step("Write reports") as step:
+        step.detail(f"output dir: {run_dir}")
         report_text_col = args.text_col if args.text_col else ", ".join(text_cols)
         reporter.write_report(
             output_dir=run_dir,
@@ -299,8 +304,6 @@ def run(args: argparse.Namespace) -> Path:
             cluster_annotations=cluster_annotations,
             output_format=args.output_format,
         )
-        # 出力ファイル名を format から決定して表示
-        # parameter_search は HTML 固定（チャート埋め込みのため）
         input_stem = Path(str(args.input)).stem
         classified_name = f"{input_stem}_classified.csv"
         if args.output_format == "html":
@@ -315,12 +318,12 @@ def run(args: argparse.Namespace) -> Path:
         )
 
     reporter_ui.footer(str(run_dir))
-    logger.info("=== 完了: %s ===", run_dir)
+    logger.info("=== done: %s ===", run_dir)
     return run_dir
 
 
 def _format_params_short(params: dict) -> str:
-    """短縮パラメータ表示（CLI進捗用）."""
+    """Short parameter string for CLI output."""
     parts: list[str] = []
     for key, value in params.items():
         if isinstance(value, float):
@@ -330,91 +333,79 @@ def _format_params_short(params: dict) -> str:
     return " ".join(parts)
 
 
-def main(argv: list[str] | None = None) -> int:
-    """スクリプト実行のエントリ."""
-    load_dotenv()
-    args = parse_args(argv)
-    try:
-        run(args)
-    except Exception:
-        logger.exception("パイプラインが失敗しました")
-        return 1
-    return 0
-
-
 def _parse_column_specs(
     args: argparse.Namespace,
 ) -> tuple[list[str] | None, dict[str, str]]:
-    """--text-cols と --column-labels を解析してタプルで返す.
+    """Parse `--text-cols` and `--column-labels` into a list and dict.
 
     Returns:
-        (列リスト or None, ラベル辞書). --text-cols 未指定なら (None, {}).
+        (column_list_or_None, labels_dict). (None, {}) when --text-cols is not set.
     """
     if not args.text_cols:
         return None, {}
 
     text_cols = [c.strip() for c in args.text_cols.split(",") if c.strip()]
     if not text_cols:
-        raise ValueError("--text-cols が空です")
+        raise ValueError("--text-cols is empty")
 
     labels: dict[str, str] = {}
     if args.column_labels:
         for pair in args.column_labels.split(","):
             if "=" not in pair:
                 raise ValueError(
-                    f"--column-labels の形式が不正 ('key=value' 形式): {pair}"
+                    f"--column-labels expects `key=value` pairs, got: {pair}"
                 )
             key, value = pair.split("=", 1)
             labels[key.strip()] = value.strip()
 
     if args.text_col:
-        raise ValueError("--text-col と --text-cols は同時に指定できません")
+        raise ValueError("--text-col and --text-cols are mutually exclusive")
 
     return text_cols, labels
 
 
 def _resolve_text_col_interactively(input_path: Path) -> str:
-    """`--text-col` 未指定時、CSVを解析して候補を提示しユーザに選ばせる.
+    """Analyse the CSV and prompt the user to pick a text column.
 
-    - 1 件しか候補がなければ確認のみで即採用
-    - 複数あれば番号で選択、Enter で先頭候補
+    - A single candidate is auto-confirmed.
+    - With several candidates, prompt for a number; Enter picks the first.
+    - In non-interactive environments, the first candidate is picked.
     """
     candidates = loader.suggest_text_columns(input_path)
     if not candidates:
         raise ValueError(
-            f"{input_path} からテキスト列候補が見つかりません. "
-            "--text-col で明示的に指定してください"
+            f"No text column candidates found in {input_path}. "
+            "Specify one explicitly with --text-col."
         )
 
-    print("\n対象テキスト列の候補:", file=sys.stderr)
+    print("\nText column candidates:", file=sys.stderr)
     for idx, cand in enumerate(candidates, start=1):
         sample_preview = " / ".join(
             s[:40] + ("…" if len(s) > 40 else "") for s in cand.sample_values
         )
         print(
             f"  [{idx}] {cand.name}  "
-            f"(平均 {cand.avg_length:.0f}字, 非空 {cand.non_empty_ratio * 100:.0f}%, "
-            f"ユニーク率 {cand.unique_ratio * 100:.0f}%)\n"
-            f"       例: {sample_preview}",
+            f"(avg {cand.avg_length:.0f} chars, non-empty {cand.non_empty_ratio * 100:.0f}%, "
+            f"unique {cand.unique_ratio * 100:.0f}%)\n"
+            f"       e.g. {sample_preview}",
             file=sys.stderr,
         )
 
     if len(candidates) == 1:
         chosen = candidates[0]
-        print(f"\n単一候補のため採用: {chosen.name}\n", file=sys.stderr)
+        print(f"\nOnly one candidate — picking: {chosen.name}\n", file=sys.stderr)
         return chosen.name
 
-    # 対話入力（非対話環境では先頭候補を採用）
     default = candidates[0]
     if not sys.stdin.isatty():
         print(
-            f"\n非対話モード: 先頭候補 {default.name} を採用\n",
+            f"\nNon-interactive mode: picking the top candidate {default.name}\n",
             file=sys.stderr,
         )
         return default.name
 
     while True:
-        raw = input(f"\n番号を選択 [1-{len(candidates)}], Enter で [{default.name}]: ")
+        raw = input(f"\nSelect [1-{len(candidates)}], Enter for [{default.name}]: ")
         choice = raw.strip()
         if not choice:
             return default.name
@@ -422,22 +413,21 @@ def _resolve_text_col_interactively(input_path: Path) -> str:
             idx = int(choice)
             if 1 <= idx <= len(candidates):
                 return candidates[idx - 1].name
-        print("無効な入力です", file=sys.stderr)
+        print("Invalid input", file=sys.stderr)
 
 
 def _configure_logging(level: str, log_path: Path) -> None:
-    """stderr と run.log の両方にログを出す.
+    """Set up logging to both stderr and `run.log`.
 
-    - stderr: ユーザ指定の `--log-level` に従う（既定 INFO）
-    - run.log: 常に **INFO 以上** を記録（`--log-level ERROR` 指定時でも
-      キャッシュヒットやフェーズ完了は残して、後追い調査できるようにする）
+    - stderr uses the user-specified `--log-level` (so `ERROR` stays quiet).
+    - run.log always records INFO and above, even when stderr is set to ERROR,
+      so that cache hits and phase outcomes can be reviewed after the fact.
     """
     root = logging.getLogger()
-    # ハンドラが受け取る最小レベル. INFO 未満を画面に出すことは想定しない
-    # （DEBUG は CLI の --log-level=DEBUG 指定時のみ有効化）
+    # Minimum level processed by the handlers below.
     root.setLevel("DEBUG" if level == "DEBUG" else "INFO")
 
-    # ハンドラが既に設定されているなら一旦リセット（再実行時の重複防止）
+    # Reset handlers so repeated runs in the same process don't duplicate lines.
     for handler in list(root.handlers):
         root.removeHandler(handler)
 
@@ -446,17 +436,29 @@ def _configure_logging(level: str, log_path: Path) -> None:
         datefmt="%H:%M:%S",
     )
 
-    # stderr はユーザ指定レベル（静かに動かしたい場合は ERROR で抑制可能）
+    # stderr honours the user-requested level (ERROR silences INFO/WARNING).
     stream_handler = logging.StreamHandler(sys.stderr)
     stream_handler.setFormatter(formatter)
     stream_handler.setLevel(level)
     root.addHandler(stream_handler)
 
-    # run.log は常時 INFO 以上を記録（キャッシュヒット等の運用情報を保全）
+    # run.log always captures INFO+ so cache hits and phase decisions are kept.
     file_handler = logging.FileHandler(log_path, encoding="utf-8")
     file_handler.setFormatter(formatter)
     file_handler.setLevel("DEBUG" if level == "DEBUG" else "INFO")
     root.addHandler(file_handler)
+
+
+def main(argv: list[str] | None = None) -> int:
+    """Script entrypoint."""
+    load_dotenv()
+    args = parse_args(argv)
+    try:
+        run(args)
+    except Exception:
+        logger.exception("Pipeline failed")
+        return 1
+    return 0
 
 
 if __name__ == "__main__":  # pragma: no cover

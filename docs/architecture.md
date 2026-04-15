@@ -1,65 +1,79 @@
 # Architecture
 
-## モジュール構成とデータフロー
+## Modules and Data Flow
 
 ```
-┌──────────┐   DataFrame     ┌──────────┐   ndarray(N,D)    ┌─────────┐
-│ loader   │ ─────────────► │ embedder │ ─────────────────► │ tuner   │
-└──────────┘                 └──────────┘                    └────┬────┘
-                                                                   │ BestConfig
-                                                                   ▼
-                              ┌──────────┐     labels / reps   ┌───────────┐
-                              │ reporter │ ◄─────────────────── │ clusterer │
-                              └────┬─────┘                      └───────────┘
-                                   │
-                                   ▼
-                      data/output/YYYYMMDD_HHMMSS/
-                      ├─ report.md
-                      ├─ clusters.csv
-                      └─ params.json
+┌──────────┐   DataFrame      ┌──────────┐   ndarray(N,D)       ┌─────────┐
+│ loader   │ ───────────────▶ │ embedder │ ───────────────────▶ │ tuner   │
+└──────────┘                  └──────────┘                       └────┬────┘
+                                                                      │ BestConfig
+                                                                      ▼
+                        ┌──────────┐     labels / reps      ┌───────────┐
+                        │ reporter │ ◀────────────────────── │ clusterer │
+                        └────┬─────┘                         └───────────┘
+                             │              (optional)             ▲
+                             │                     ┌──────────────┘
+                             ▼                     │ annotations
+                 data/output/YYYYMMDD_HHMMSS/     ┌┴───────┐
+                 ├─ report.md / report.html      │ namer  │
+                 ├─ parameter_search.html        └────────┘  (LLM labels & summaries)
+                 ├─ clusters.csv
+                 ├─ <input>_classified.csv
+                 └─ params.json
 ```
 
-`pipeline.py` が唯一のエントリポイントで、各モジュールを順に呼び出す。
+`pipeline.py` is the only entrypoint; it calls each module in order.
 
-## モジュール責務
+## Module Responsibilities
 
 ### `loader.py`
-- CSVを読み込み、指定テキスト列を抽出
-- 文字正規化（NFKC）、空白圧縮、空行除去
-- 返り値: `pandas.DataFrame`（元の全列 + `_normalized_text` 列）
+- Read the CSV and extract the chosen text column.
+- Apply character normalisation (NFKC), whitespace collapse, and empty-row removal.
+- Return a `pandas.DataFrame` (original columns + `_normalized_text`).
 
 ### `embedder.py`
-- `text-embedding-3-small` をデフォルトに OpenAI API を呼び出し
-- **キャッシュ必須**: テキストのSHA-256ハッシュをキーに `cache/embeddings_<model>.pkl` に保存
-- バッチ取得（最大 `BATCH_SIZE` 件）
-- 返り値: `np.ndarray` shape=(N, D)
+- Default to `text-embedding-3-small`.
+- **Cache required**: keyed by SHA-256 of the text, persisted to
+  `cache/embeddings_<model>.pkl`.
+- Batch fetching (up to `BATCH_SIZE`) with parallel requests.
+- Returns `np.ndarray` with shape `(N, D)`.
 
 ### `tuner.py`
-- 候補手法と候補パラメータを列挙
-    - K-Means: `k ∈ [min_k, max_k]`
-    - DBSCAN: `eps` をサンプリング、`min_samples = max(3, ⌈ln N⌉)`
-    - HDBSCAN: `min_cluster_size` をサンプリング
-- 各候補でクラスタリングし、シルエットスコア（cosine）を評価
-- スコア最大の設定を `BestConfig(algorithm, params, score, labels)` として返却
-- 詳細は [`algorithm.md`](algorithm.md) を参照
+- Enumerate candidate methods and parameters:
+    - KMeans: `k ∈ [min_k, max_k]`
+    - DBSCAN: grid over `eps`, `min_samples = max(3, ⌈ln N⌉)`
+    - HDBSCAN: sweep over `min_cluster_size`
+- Score each candidate with cosine silhouette.
+- Return a `BestConfig(algorithm, params, score, labels)`.
+- See [`algorithm.md`](algorithm.md).
 
 ### `clusterer.py`
-- `BestConfig` を受け取り、代表テキストを抽出
-- 各クラスタについて、重心に最も近い上位N件（コサイン距離）を返す
-- ノイズラベル（-1）は除外してまとめて扱う
+- Take a `BestConfig` and extract representative texts.
+- For each cluster, return the top-N rows closest to the centroid
+  (cosine distance).
+- Noise (label `-1`) is grouped but carries no representatives.
+
+### `namer.py` (optional)
+- Infer the dataset's business context from a small sample.
+- Generate label + summary per cluster in parallel, grounded on the context.
+- Resolve duplicate labels by differentiating the smaller clusters.
 
 ### `reporter.py`
-- `report.md` ... クラスタ数、スコア、件数、代表テキストを整形
-- `clusters.csv` ... 元CSVに `cluster_id` 列を付与して保存
-- `params.json` ... アルゴリズム名・選択パラメータ・スコアをJSON化
+- `report.md` / `report.html`: clustering outcome with the LLM summary (or a
+  placeholder) plus the raw near-centroid items.
+- `parameter_search.html`: full search report with a dual-axis SVG chart.
+- `clusters.csv`: one row per cluster — `cluster_id, cluster_name, size,
+  summary, rep_1..N`.
+- `<input>_classified.csv`: original data plus `cluster_id` / `cluster_name`.
+- `params.json`: machine-readable metadata.
 
 ### `pipeline.py`
-- argparse でCLI引数を受け取る
-- タイムスタンプ付き出力ディレクトリを作成
-- `loader → embedder → tuner → clusterer → reporter` を直列実行
-- ログは `logging` モジュールで stderr + `output_dir/run.log` に出す
+- Parse CLI arguments.
+- Create a timestamped output directory.
+- Run `loader → embedder → tuner → clusterer → (namer) → reporter`.
+- Log to stderr and `output_dir/run.log` (INFO+ always captured).
 
-## 型とインタフェース
+## Types and Interfaces
 
 ```python
 # tuner.py
@@ -77,20 +91,27 @@ class BestConfig:
 class ClusterSummary:
     cluster_id: int
     size: int
-    representative_indices: list[int]  # len = top_k
+    representative_indices: list[int]
     representative_texts: list[str]
+
+# namer.py
+@dataclass
+class ClusterAnnotation:
+    label: str
+    summary: str
 ```
 
-## I/O 規約
+## I/O Contract
 
-- **I/Oを直接扱うのは `pipeline.py` のみ**（CSV読込は `loader.py` が担うが、入出力パスは `pipeline.py` から渡す）
-- 他モジュールは純粋関数として設計し、テスト容易性を確保
+- **Only `pipeline.py` performs I/O directly.** `loader.py` takes a path
+  passed in by the pipeline; everything else operates on in-memory data.
+- Other modules stay close to pure functions so they remain easy to test.
 
-## 失敗モード
+## Failure Modes
 
-| 事象 | 扱い |
+| Situation | Handling |
 |---|---|
-| APIキー未設定 | 起動直後に `RuntimeError` |
-| OpenAI API 失敗（レートリミット等） | 指数バックオフ + 最大N回リトライ、超えたら `raise` |
-| 有効サンプル数 < `min_clusters` | チューニング前に `ValueError` で中断 |
-| 全クラスタがノイズ | `clusterer` がノイズのみのレポートを出し、スコアは `nan` 記録 |
+| `OPENAI_API_KEY` unset | `RuntimeError` at startup |
+| OpenAI API failure (rate limit, etc.) | Exponential backoff with N retries; then `raise` |
+| Effective sample count < `min_clusters` | `ValueError` before tuning |
+| All noise | `clusterer` emits a noise-only report; score recorded as `nan` |

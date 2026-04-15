@@ -1,4 +1,4 @@
-"""tuner モジュールのテスト — 合成データで最適解選択を確認."""
+"""Tests for the tuner module using synthetic blobs."""
 
 from __future__ import annotations
 
@@ -14,7 +14,7 @@ def _synthetic_blobs(
     noise_std: float = 0.05,
     seed: int = 42,
 ) -> np.ndarray:
-    """中心点の周りに球状ノイズでサンプルを生成."""
+    """Sample points around each centroid with spherical noise."""
     rng = np.random.default_rng(seed)
     arrays: list[np.ndarray] = []
     for c in centers:
@@ -29,7 +29,7 @@ def _synthetic_blobs(
 
 
 def test_finds_three_clusters_on_clean_blobs() -> None:
-    """明瞭に分離した 3 クラスタで最適解が見つかること."""
+    """Three well-separated clusters are recovered."""
     centers = [
         [1.0, 0.0, 0.0],
         [0.0, 1.0, 0.0],
@@ -39,23 +39,23 @@ def test_finds_three_clusters_on_clean_blobs() -> None:
 
     best = tuner.find_best_clustering(X, min_clusters=2, max_clusters=10)
 
-    # 3 クラスタが検出されること
+    # Three clusters are detected
     assert best.n_clusters == 3
-    # シルエットは十分高いはず
+    # Silhouette should be comfortably high
     assert best.silhouette > 0.5
-    # ラベルは入力行数と一致
+    # Labels match the number of input rows
     assert best.labels.shape == (X.shape[0],)
 
 
 def test_raises_when_too_few_samples() -> None:
-    """サンプル不足なら ValueError."""
+    """Too few samples raises ValueError."""
     X = np.zeros((1, 4), dtype=np.float32)
     with pytest.raises(ValueError):
         tuner.find_best_clustering(X, min_clusters=2)
 
 
 def test_quality_flag_thresholds() -> None:
-    """quality_flag の判定境界."""
+    """Threshold boundaries for quality_flag."""
     labels = np.zeros(3, dtype=int)
     good = tuner.BestConfig(
         algorithm="kmeans", params={}, silhouette=0.45,
@@ -75,9 +75,9 @@ def test_quality_flag_thresholds() -> None:
 
 
 def test_all_trials_are_recorded() -> None:
-    """試行履歴が all_trials に残ること."""
+    """All trials are recorded in all_trials."""
     X = _synthetic_blobs([[1.0, 0.0], [0.0, 1.0]], per_cluster=20)
     best = tuner.find_best_clustering(X, min_clusters=2, max_clusters=5)
-    # KMeans だけで複数の K を試しているはず
+    # KMeans alone should try multiple K values
     kmeans_trials = [t for t in best.all_trials if t["algorithm"] == "kmeans"]
     assert len(kmeans_trials) >= 2

@@ -1,14 +1,16 @@
-"""自動チューナー — 候補手法を走査し最適なクラスタ設定を選ぶ.
+"""Auto-tuner — sweeps candidate methods and picks the best clustering config.
 
-参考: Chatbot Knowledge Preparation System の parameter_search.py
-    - サンプル 1500 件でスイープ（O(n²)シルエットが現実的な上限）
-    - 離散的・人が読めるパラメータグリッド
-    - 1) サンプルでスイープ → 2) 勝者パラメータでフル再実行 の2相構成
+References:
+    - `Chatbot Knowledge Preparation System` / `worker/src/steps/parameter_search.py`:
+      sample 1,500 points (ceiling for O(n²) silhouette), discrete human-readable
+      parameter grids, and a two-phase flow (sweep on sample → re-run with the
+      winning config on the full data).
 
-責務:
-    - L2 正規化した埋め込みに対し MiniBatchKMeans / DBSCAN / HDBSCAN を試行
-    - 各候補のシルエットスコア（コサイン）を計算
-    - 最大スコアの設定を `BestConfig` として返却（labels は全点分）
+Responsibilities:
+    - L2-normalise the embedding matrix; optionally reduce dimensionality via PCA.
+    - Run MiniBatchKMeans / DBSCAN / HDBSCAN over the sample.
+    - Compute silhouette score (cosine) for each candidate.
+    - Return the winning configuration as `BestConfig`, with labels for every row.
 """
 
 from __future__ import annotations
@@ -25,65 +27,69 @@ from tqdm import tqdm
 
 logger = logging.getLogger(__name__)
 
-# HDBSCAN はオプショナル（環境によって導入困難なことがある）
-try:  # pragma: no cover - 環境依存
+# HDBSCAN is optional; it is occasionally painful to install on some platforms.
+try:  # pragma: no cover - environment-dependent
     import hdbscan  # type: ignore[import-not-found]
 
     _HDBSCAN_AVAILABLE = True
 except ImportError:  # pragma: no cover
     _HDBSCAN_AVAILABLE = False
-    logger.info("hdbscan 未導入のため HDBSCAN 候補はスキップされます")
+    logger.info("hdbscan is not installed; HDBSCAN candidates will be skipped")
 
 
 Algorithm = Literal["kmeans", "dbscan", "hdbscan"]
 
-# CKPS 準拠のスイープサンプル数. シルエット(cosine)の O(n²) 計算を許容できる上限
+# Sample size for the sweep. 1,500 is the practical ceiling for O(n²) cosine silhouette.
 SWEEP_SAMPLE_SIZE: int = 1500
 
-# 高次元埋め込み（例: 1536d）は距離の集中で cosine 類似度が狭い帯域に固まり
-# KMeans/DBSCAN/HDBSCAN の識別力が大幅に落ちる. PCA で ~30 次元に落とすと
-# 意味のある距離分散が戻る（LLM Topic Modeler の ClusteringService.swift 参照）
+# High-dimensional embeddings (e.g. 1,536d) suffer from distance concentration,
+# which collapses cosine similarities into a narrow band and destroys the
+# discriminative power of KMeans/DBSCAN/HDBSCAN. Projecting onto ~30 PCA
+# components restores meaningful variance.
+# See: `LLM Topic Modeler / Sources/Services/ClusteringService.swift`.
 PCA_TARGET_DIM: int = 30
 PCA_DIM_THRESHOLD: int = 50
 
-# K 候補（CKPS を踏襲しつつ、小データ向けに 2, 3 も保持）
+# K candidate set (inherits CKPS's grid; keeps small K too for tiny datasets).
 K_CANDIDATES: tuple[int, ...] = (2, 3, 5, 7, 10, 15, 20, 30, 50, 80)
 
-# HDBSCAN の min_cluster_size 候補（CKPS 準拠）
+# HDBSCAN `min_cluster_size` candidates (matches CKPS).
 HDBSCAN_MCS_CANDIDATES: tuple[int, ...] = (5, 10, 15, 20, 30, 50, 80, 100)
 HDBSCAN_MIN_SAMPLES: int = 5
 
-# DBSCAN eps グリッド（L2 正規化後の euclidean スケール）
-# 正規化後: euclidean² = 2 × (1 - cos_sim). cos_sim=0.75 なら eps ≈ 0.707
+# DBSCAN `eps` grid on the L2-normalised euclidean scale.
+# After normalisation: euclidean² = 2 * (1 - cos_sim). Example: cos_sim=0.75 -> eps ≈ 0.707.
 DBSCAN_EPS_GRID: tuple[float, ...] = (0.25, 0.35, 0.45, 0.55, 0.70)
 DBSCAN_MIN_SAMPLES: int = 5
 
-# 実用性フィルタ: ノイズ率がこの値を超える候補は選択対象外（高スコアでも無意味）
+# Usability filter: drop candidates whose noise ratio exceeds this threshold.
+# A high score on "6 tiny clusters carved out of 1,500 points with 97% noise"
+# is numerically valid but operationally useless.
 MAX_NOISE_RATIO_FOR_SELECTION: float = 0.5
 
-# スコア閾値
+# Score thresholds for the quality flag.
 SCORE_GOOD: float = 0.40
 SCORE_WARN: float = 0.20
 
-# 再現性のための乱数種
+# Fixed random seed for reproducibility across runs.
 RANDOM_STATE: int = 42
 
 
 @dataclass
 class BestConfig:
-    """チューニング結果.
+    """Tuning result.
 
     Attributes:
-        algorithm: 採用アルゴリズム名
-        params: 採用パラメータ（辞書）
-        silhouette: シルエットスコア（cosine, 最終ラベル全点に対する評価）
-        labels: 全サンプルに対するクラスタラベル（ノイズは -1）
-        n_clusters: 有効なクラスタ数（ノイズを除く）
-        n_noise: ノイズ点数
-        all_trials: スイープで評価した全候補のスコアログ（フィルタ前）
-        sweep_sample_size: スイープに使った点数（ノイズ率算出用）
-        dim_before_pca: PCA 前の次元（PCA 非適用時は削減後次元と一致）
-        dim_after_pca: PCA 後の次元
+        algorithm: chosen algorithm name
+        params: chosen parameters (dict)
+        silhouette: final silhouette score (cosine) on the full data
+        labels: cluster labels for every row; noise is -1
+        n_clusters: number of valid clusters (noise excluded)
+        n_noise: number of noise points
+        all_trials: score log for every swept candidate (pre-filter)
+        sweep_sample_size: points used during the sweep (for noise ratio reporting)
+        dim_before_pca: dimension before PCA; equals `dim_after_pca` when PCA skipped
+        dim_after_pca: dimension after PCA
     """
 
     algorithm: Algorithm
@@ -99,7 +105,7 @@ class BestConfig:
 
     @property
     def quality_flag(self) -> Literal["good", "warn", "poor"]:
-        """スコアに基づく品質判定."""
+        """Quality classification based on the silhouette score."""
         if self.silhouette >= SCORE_GOOD:
             return "good"
         if self.silhouette >= SCORE_WARN:
@@ -108,7 +114,7 @@ class BestConfig:
 
     @property
     def max_noise_ratio(self) -> float:
-        """採用時に使用したノイズ率フィルタ閾値（レポート表示用）."""
+        """Noise-ratio filter threshold used during selection (surfaced in reports)."""
         return MAX_NOISE_RATIO_FOR_SELECTION
 
 
@@ -117,33 +123,34 @@ def find_best_clustering(
     min_clusters: int = 2,
     max_clusters: int = 20,
 ) -> BestConfig:
-    """埋め込み行列に対して最適なクラスタリング設定を探す.
+    """Search for the best clustering configuration over the embedding matrix.
 
-    フェーズ1: SWEEP_SAMPLE_SIZE 件のサブサンプルで全候補を走査しスコア評価.
-    フェーズ2: 勝者アルゴリズム・パラメータでフルデータにラベルを付与.
+    Phase 1: sweep every candidate on a `SWEEP_SAMPLE_SIZE` subsample and score it.
+    Phase 2: re-run the winning (algorithm, params) on the full data to label it.
 
     Args:
-        embeddings: shape=(N, D) の埋め込み行列
-        min_clusters: KMeans 候補の下限 K（スイープフィルタ）
-        max_clusters: KMeans 候補の上限 K（スイープフィルタ）
+        embeddings: shape (N, D) embedding matrix
+        min_clusters: lower bound of K during sweep filtering
+        max_clusters: upper bound of K during sweep filtering
 
     Returns:
         BestConfig
 
     Raises:
-        ValueError: サンプル数が min_clusters を下回る
+        ValueError: if the sample count is below `min_clusters`
     """
     n_samples = embeddings.shape[0]
     if n_samples < max(2, min_clusters):
         raise ValueError(
-            f"サンプル数 {n_samples} がクラスタリングに不足 (min_clusters={min_clusters})"
+            f"Only {n_samples} samples, not enough for clustering "
+            f"(min_clusters={min_clusters})"
         )
 
-    # コサイン類似度でユークリッド距離と等価換算するため L2 正規化
+    # L2-normalise so euclidean distance is monotonic with cosine distance.
     normalized = _l2_normalize(embeddings)
 
-    # 次元の呪い対策: 高次元ならば PCA で ~30次元に削減して再正規化.
-    # 同一モデルで fit した PCA を phase1/phase2 で使い回す
+    # Curse-of-dimensionality mitigation: project to ~30 PCA dims and renormalise.
+    # The same PCA model is reused across phase1 and phase2.
     reduced, pca_model = _reduce_dimensions(normalized)
     logger.info(
         "tuner: dim %d -> %d (pca=%s)",
@@ -152,7 +159,7 @@ def find_best_clustering(
         pca_model is not None,
     )
 
-    # フェーズ1: サンプリング → スイープ
+    # Phase 1: sampling -> sweep.
     sample_indices = _sample_indices(n_samples, SWEEP_SAMPLE_SIZE, seed=RANDOM_STATE)
     sample = reduced[sample_indices]
     logger.info(
@@ -168,9 +175,9 @@ def find_best_clustering(
     if _HDBSCAN_AVAILABLE:
         trials.extend(_sweep_hdbscan(sample))
 
-    # 候補フィルタ:
-    # 1. シルエット計算が成立 (silhouette != None)
-    # 2. ノイズ率が閾値以下（少数点で高スコアを取る病的ケースを排除）
+    # Filter candidates:
+    # 1. Silhouette must be computable (not None, not -1).
+    # 2. Noise ratio must be within the usability threshold.
     valid = [
         t for t in trials
         if t["silhouette"] is not None
@@ -178,14 +185,14 @@ def find_best_clustering(
         and (t["n_noise"] / sample.shape[0]) <= MAX_NOISE_RATIO_FOR_SELECTION
     ]
     if not valid:
-        # フォールバック: フィルタを緩めて、スコアがある候補から選ぶ
+        # Relax the filter and try again; emit a warning so the issue is visible.
         logger.warning(
-            "全候補でノイズ率 > %.0f%%. フィルタを緩めて選択します",
+            "All candidates have noise ratio > %.0f%%. Relaxing the filter.",
             MAX_NOISE_RATIO_FOR_SELECTION * 100,
         )
         valid = [t for t in trials if t["silhouette"] is not None and t["silhouette"] > -1.0]
     if not valid:
-        raise RuntimeError("有効なクラスタリング候補が得られませんでした")
+        raise RuntimeError("No valid clustering candidate was produced")
 
     winner = max(valid, key=lambda t: t["silhouette"])
     logger.info(
@@ -195,7 +202,7 @@ def find_best_clustering(
         winner["silhouette"],
     )
 
-    # フェーズ2: 勝者設定で PCA 後の空間でフルデータにラベル付与
+    # Phase 2: apply the winning config to the full (PCA-reduced) data.
     logger.info("phase2: apply winner to full data (N=%d)", n_samples)
     final_labels = _apply_to_full(
         normalized=reduced,
@@ -213,11 +220,11 @@ def find_best_clustering(
         max_points=SWEEP_SAMPLE_SIZE,
     )
     if final_score is None:
-        # フル反映で単一クラスタ化した場合のフォールバック
+        # If the full-data run collapses to a single cluster, score stays very low.
         final_score = float("-inf")
 
     logger.info(
-        "採用: %s params=%s final_score=%.4f clusters=%d noise=%d",
+        "Selected: %s params=%s final_score=%.4f clusters=%d noise=%d",
         winner["algorithm"],
         winner["params"],
         final_score,
@@ -240,14 +247,14 @@ def find_best_clustering(
 
 
 # ---------------------------------------------------------------------------
-# Sweep — 各手法ごとにサブサンプルで走査
+# Sweep: evaluate each method over the sample
 # ---------------------------------------------------------------------------
 
 
 def _sweep_kmeans(
     sample: np.ndarray, min_k: int, max_k: int
 ) -> list[dict[str, Any]]:
-    """MiniBatchKMeans を K 候補で走査."""
+    """Sweep MiniBatchKMeans over the K candidate set."""
     n = sample.shape[0]
     candidates = [
         k for k in K_CANDIDATES if max(2, min_k) <= k <= min(max_k, n - 1)
@@ -281,13 +288,14 @@ def _sweep_kmeans(
 
 
 def _sweep_dbscan(sample: np.ndarray) -> list[dict[str, Any]]:
-    """DBSCAN を eps グリッドで走査."""
+    """Sweep DBSCAN over the `eps` grid."""
     trials: list[dict[str, Any]] = []
     for eps in tqdm(DBSCAN_EPS_GRID, desc="DBSCAN sweep", unit="eps", leave=False):
         model = DBSCAN(
             eps=float(eps),
             min_samples=DBSCAN_MIN_SAMPLES,
-            metric="euclidean",  # L2正規化済みなので euclidean で OK
+            # Euclidean is fine because the input is already L2-normalised.
+            metric="euclidean",
             n_jobs=-1,
         )
         labels = model.fit_predict(sample)
@@ -310,7 +318,7 @@ def _sweep_dbscan(sample: np.ndarray) -> list[dict[str, Any]]:
 
 
 def _sweep_hdbscan(sample: np.ndarray) -> list[dict[str, Any]]:
-    """HDBSCAN を min_cluster_size 候補で走査."""
+    """Sweep HDBSCAN over the `min_cluster_size` candidate set."""
     trials: list[dict[str, Any]] = []
     n = sample.shape[0]
     candidates = [m for m in HDBSCAN_MCS_CANDIDATES if m < n]
@@ -344,7 +352,7 @@ def _sweep_hdbscan(sample: np.ndarray) -> list[dict[str, Any]]:
 
 
 # ---------------------------------------------------------------------------
-# Phase 2 — 勝者設定でフルデータへ
+# Phase 2: apply the winner to the full data
 # ---------------------------------------------------------------------------
 
 
@@ -356,17 +364,18 @@ def _apply_to_full(
     algorithm: Algorithm,
     params: dict[str, Any],
 ) -> np.ndarray:
-    """勝者設定をフルデータに適用してラベルを得る.
+    """Run the winning config on the full data and return labels.
 
-    いずれの手法も **フルデータで再実行** する方針（サンプル伝播だと
-    サンプルが局所密領域しか捉えなかった場合に大量ノイズ化するため）.
+    We always refit (no nearest-neighbour label propagation) because propagation
+    from a 1.5k sample to 8k+ points tends to classify 80-90% of rows as noise
+    when the sample doesn't span the full manifold.
 
-    - KMeans: MiniBatchKMeans を全点で再 fit + predict
-    - DBSCAN: ball_tree で euclidean、n_jobs=-1
-    - HDBSCAN: core_dist_n_jobs=-1 で euclidean
+    - KMeans: refit MiniBatchKMeans and predict.
+    - DBSCAN: euclidean with ball_tree, n_jobs=-1.
+    - HDBSCAN: core_dist_n_jobs=-1 with euclidean.
     """
     if normalized.shape[0] == sample.shape[0]:
-        # N が既にサンプル以下なら、サンプルのラベルをそのまま返す
+        # Already fit on the entire dataset; just return the sample labels.
         return sample_labels.astype(np.int64)
 
     logger.info("phase2 running %s on full N=%d", algorithm, normalized.shape[0])
@@ -408,18 +417,19 @@ def _apply_to_full(
 
 
 def _l2_normalize(x: np.ndarray) -> np.ndarray:
-    """行ごとに L2 正規化. ゼロ行は正準基底ベクトル `e_0` に置換.
+    """Normalise each row to unit L2 length.
 
-    素のゼロ行を残すと、下流で `X / ||X||` 形の計算を行う sklearn の
-    silhouette_score / cosine_distances などが divide-by-zero を踏む.
-    決定的な単位ベクトルに置換することで、意味のある距離計算は維持しつつ
-    警告を根絶する（置換された行同士は cosine_sim=1 でまとまる）.
+    Zero-norm rows are replaced by the canonical basis vector `e_0`. Leaving them
+    as zeros would trigger divide-by-zero warnings downstream in
+    silhouette_score / cosine_distances. Substituting a deterministic unit
+    vector keeps distance math well-defined and eliminates the warning spam.
     """
     norms = np.linalg.norm(x, axis=1, keepdims=True)
     zero_mask = norms.flatten() == 0
     if zero_mask.any():
         logger.warning(
-            "ゼロノルム行を %d 件検出. 正準基底 e_0 に置換します", int(zero_mask.sum())
+            "Replacing %d zero-norm rows with the canonical basis e_0",
+            int(zero_mask.sum()),
         )
         x = x.copy()
         x[zero_mask, 0] = 1.0
@@ -432,11 +442,10 @@ def _reduce_dimensions(
     target_dim: int = PCA_TARGET_DIM,
     threshold: int = PCA_DIM_THRESHOLD,
 ) -> tuple[np.ndarray, PCA | None]:
-    """PCA で次元削減し、削減後に再 L2 正規化する.
+    """PCA to `target_dim` components, then re-normalise to unit length.
 
-    入力次元が `threshold` 以下ならそのまま返す（削減不要）.
-    返り値は (削減後の配列, fit 済み PCA モデル). PCA をかけなかった場合は
-    2要素目が None.
+    Returns (reduced_array, fitted_pca_or_None). PCA is skipped when the input
+    dimensionality is at or below `threshold`.
     """
     n, dim = x.shape
     if dim <= threshold:
@@ -444,13 +453,13 @@ def _reduce_dimensions(
     n_components = min(target_dim, dim, max(1, n - 1))
     pca = PCA(n_components=n_components, random_state=RANDOM_STATE)
     reduced = pca.fit_transform(x)
-    # PCA 後は単位長でなくなるため再正規化（cosine 等価性を維持）
+    # Re-normalise after projection to keep cosine equivalence.
     reduced = _l2_normalize(reduced)
     return reduced.astype(np.float32, copy=False), pca
 
 
 def _sample_indices(n: int, cap: int, seed: int) -> np.ndarray:
-    """評価・fit 用のインデックス配列を決定."""
+    """Return the index array used for evaluation / fitting."""
     if n <= cap:
         return np.arange(n)
     rng = np.random.default_rng(seed)
@@ -458,9 +467,9 @@ def _sample_indices(n: int, cap: int, seed: int) -> np.ndarray:
 
 
 def _silhouette_on_sample(sample: np.ndarray, labels: np.ndarray) -> float | None:
-    """サンプル全点に対してシルエット（cosine）を計算.
+    """Compute cosine silhouette on the full sample.
 
-    ノイズ（-1）を除外後、有効クラスタが 2 未満なら None.
+    Returns None when noise is excluded and fewer than 2 valid clusters remain.
     """
     mask = labels != -1
     if mask.sum() < 2:
@@ -473,14 +482,14 @@ def _silhouette_on_sample(sample: np.ndarray, labels: np.ndarray) -> float | Non
             silhouette_score(sample[mask], labels[mask], metric="cosine")
         )
     except ValueError as exc:
-        logger.debug("silhouette 計算失敗: %s", exc)
+        logger.debug("silhouette computation failed: %s", exc)
         return None
 
 
 def _evaluate_silhouette(
     normalized: np.ndarray, labels: np.ndarray, max_points: int
 ) -> float | None:
-    """フルデータのラベルを、最大 max_points 点のサブサンプルで評価."""
+    """Evaluate silhouette on at most `max_points` random rows."""
     n = normalized.shape[0]
     if n <= max_points:
         return _silhouette_on_sample(normalized, labels)
@@ -491,7 +500,7 @@ def _evaluate_silhouette(
 
 
 def _count_clusters(labels: np.ndarray) -> tuple[int, int]:
-    """(有効クラスタ数, ノイズ数) を返す."""
+    """Return (number_of_valid_clusters, noise_count)."""
     unique = set(labels.tolist())
     n_noise = int((labels == -1).sum())
     n_clusters = len(unique - {-1})
@@ -499,7 +508,7 @@ def _count_clusters(labels: np.ndarray) -> tuple[int, int]:
 
 
 def _trial_log(trial: dict[str, Any]) -> dict[str, Any]:
-    """all_trials に格納するコンパクトな辞書（sample_labels は除外）."""
+    """Compact dict suitable for `all_trials` (drops heavy fields like sample_labels)."""
     return {
         "algorithm": trial["algorithm"],
         "params": trial["params"],

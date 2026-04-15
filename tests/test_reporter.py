@@ -1,4 +1,4 @@
-"""reporter モジュールのテスト — 4ファイル出力と分類ロジック."""
+"""Tests for the reporter module — covers all output files."""
 
 from __future__ import annotations
 
@@ -14,7 +14,7 @@ from src.tuner import BestConfig
 
 
 def _make_best(trials: list[dict]) -> BestConfig:
-    """テスト用の BestConfig を合成."""
+    """Assemble a BestConfig for tests."""
     return BestConfig(
         algorithm="kmeans",
         params={"k": 3},
@@ -45,7 +45,7 @@ def _make_df_and_summaries() -> tuple[pd.DataFrame, list[ClusterSummary]]:
 
 
 def test_write_report_produces_expected_files(tmp_path: Path) -> None:
-    """report.md / parameter_search.md / clusters.csv / <入力名>_classified.csv / params.json が生成される."""
+    """All expected files are produced."""
     df, summaries = _make_df_and_summaries()
     best = _make_best(trials=[
         {"algorithm": "kmeans", "params": {"k": 3}, "silhouette": 0.35, "n_clusters": 3, "n_noise": 0},
@@ -61,22 +61,22 @@ def test_write_report_produces_expected_files(tmp_path: Path) -> None:
         text_col="対応内容",
     )
 
-    # parameter_search.md は廃止. parameter_search.html は format によらず常時生成.
+    # parameter_search.md is retired; parameter_search.html is always produced.
     expected = [
         "report.md",
         "parameter_search.html",
         "clusters.csv",
-        "input_classified.csv",  # `input.csv` の stem が input
+        "input_classified.csv",  # stem of input.csv is "input"
         "params.json",
     ]
     for name in expected:
-        assert (tmp_path / name).exists(), f"{name} が生成されていない"
-    # parameter_search.md は生成されない
+        assert (tmp_path / name).exists(), f"{name} was not generated"
+    # parameter_search.md is never generated
     assert not (tmp_path / "parameter_search.md").exists()
 
 
 def test_clusters_csv_is_cluster_list(tmp_path: Path) -> None:
-    """clusters.csv はクラスタ1件=1行のサマリ. 元データ行単位ではない."""
+    """clusters.csv is one-row-per-cluster, not per raw row."""
     df, summaries = _make_df_and_summaries()
     best = _make_best(trials=[
         {"algorithm": "kmeans", "params": {"k": 3}, "silhouette": 0.35,
@@ -92,19 +92,19 @@ def test_clusters_csv_is_cluster_list(tmp_path: Path) -> None:
 
     import pandas as pd
     clusters = pd.read_csv(tmp_path / "clusters.csv")
-    # 行数 = クラスタ数
+    # Row count matches cluster count
     assert len(clusters) == 3
-    # 必須列
+    # Required columns
     for col in ("cluster_id", "cluster_name", "size", "rep_1"):
         assert col in clusters.columns
-    # 最大サイズのクラスタが先頭（全てサイズ2なのでIDで確認）
+    # Largest cluster comes first (ties broken by id here)
     assert set(clusters["cluster_id"]) == {0, 1, 2}
-    # 名前が反映されている
+    # Names are reflected in output
     assert "Aグループ" in clusters["cluster_name"].tolist()
 
 
 def test_classified_csv_name_includes_input_stem(tmp_path: Path) -> None:
-    """classified CSV は <入力ファイル名>_classified.csv の形式."""
+    """classified CSV uses <input stem>_classified.csv naming."""
     df, summaries = _make_df_and_summaries()
     best = _make_best(trials=[
         {"algorithm": "kmeans", "params": {"k": 3}, "silhouette": 0.35,
@@ -118,7 +118,7 @@ def test_classified_csv_name_includes_input_stem(tmp_path: Path) -> None:
     )
 
     assert (tmp_path / "repair_full_classified.csv").exists()
-    # 行数 = 元データ件数
+    # Row count matches the original data
     import pandas as pd
     classified = pd.read_csv(tmp_path / "repair_full_classified.csv")
     assert len(classified) == len(df)
@@ -126,7 +126,7 @@ def test_classified_csv_name_includes_input_stem(tmp_path: Path) -> None:
 
 
 def test_cluster_list_places_noise_at_end(tmp_path: Path) -> None:
-    """clusters.csv はノイズクラスタを末尾に配置する."""
+    """Noise cluster is appended last in clusters.csv."""
     import numpy as np
     df = pd.DataFrame({"_normalized_text": ["a", "b", "c", "d"],
                        "_duplicate_count": [1, 1, 1, 1]})
@@ -151,14 +151,14 @@ def test_cluster_list_places_noise_at_end(tmp_path: Path) -> None:
     )
 
     clusters = pd.read_csv(tmp_path / "clusters.csv")
-    # 最終行がノイズ
+    # Noise row comes last.
     assert int(clusters.iloc[-1]["cluster_id"]) == -1
-    # ノイズは「未分類」名
-    assert clusters.iloc[-1]["cluster_name"] == "未分類"
+    # Noise label is the English placeholder.
+    assert clusters.iloc[-1]["cluster_name"] == "Unassigned"
 
 
 def test_report_md_excludes_trial_history(tmp_path: Path) -> None:
-    """report.md にスイープ詳細テーブルが含まれないこと（parameter_search.md に分離）."""
+    """Trial detail tables stay out of report.md (moved to parameter_search)."""
     df, summaries = _make_df_and_summaries()
     best = _make_best(trials=[
         {"algorithm": "kmeans", "params": {"k": 3}, "silhouette": 0.35, "n_clusters": 3, "n_noise": 0},
@@ -172,25 +172,23 @@ def test_report_md_excludes_trial_history(tmp_path: Path) -> None:
     )
 
     report_text = (tmp_path / "report.md").read_text(encoding="utf-8")
-    # 試行詳細テーブルの構造要素（列ヘッダや除外セクションの見出し）は残らない
-    assert "試行履歴" not in report_text
-    assert "採用候補ランキング" not in report_text
-    assert "ノイズ率フィルタ" not in report_text
-    # DBSCAN 候補の詳細行は report.md に出ない
+    # Search-detail section titles and candidate rows stay out of report.md.
+    assert "Accepted Candidates" not in report_text
+    assert "Rejected" not in report_text
     assert "eps=0.45" not in report_text
-    # parameter_search.md への参照がある
-    assert "parameter_search.md" in report_text
+    # It does point to the HTML parameter-search report.
+    assert "parameter_search.html" in report_text
 
 
 def test_parameter_search_separates_accepted_and_rejected(tmp_path: Path) -> None:
-    """parameter_search.md が採用/除外を分類して表示すること."""
+    """parameter_search.html shows accepted/rejected sections."""
     df, summaries = _make_df_and_summaries()
     trials = [
-        # 採用候補（ノイズ率 0%）
+        # Accepted candidate (noise ratio 0%)
         {"algorithm": "kmeans", "params": {"k": 3}, "silhouette": 0.35, "n_clusters": 3, "n_noise": 0},
-        # ノイズ率超過（97%）
+        # Noise ratio over threshold (97%)
         {"algorithm": "dbscan", "params": {"eps": 0.35, "min_samples": 5}, "silhouette": 0.86, "n_clusters": 6, "n_noise": 1457},
-        # 退化（シルエット算出不能）
+        # Degenerate (silhouette not computable)
         {"algorithm": "dbscan", "params": {"eps": 0.25, "min_samples": 5}, "silhouette": None, "n_clusters": 1, "n_noise": 1495},
     ]
     best = _make_best(trials=trials)
@@ -201,25 +199,25 @@ def test_parameter_search_separates_accepted_and_rejected(tmp_path: Path) -> Non
         best=best, input_path="/tmp/in.csv", text_col="text",
     )
 
-    # parameter_search は HTML 一本化されたので、HTML 内の Markdown 変換結果を検査
+    # parameter_search is HTML-only; inspect the rendered HTML for each section.
     search_text = (tmp_path / "parameter_search.html").read_text(encoding="utf-8")
-    # 3つのセクションが存在（h2 として変換される）
-    assert "採用候補ランキング" in search_text
-    assert "除外: ノイズ率フィルタ" in search_text
-    assert "除外: クラスタ構造が成立せず" in search_text
-    # 採用候補は ✓ マーク
-    assert "✓ 採用" in search_text
-    # 各候補が該当セクションに入っている
+    # Three section headings are present (rendered as <h2>).
+    assert "Accepted Candidates" in search_text
+    assert "Rejected — Noise-Ratio Filter" in search_text
+    assert "Rejected — No Cluster Structure" in search_text
+    # Selected candidate has the ✓ marker.
+    assert "✓ Selected" in search_text
+    # Each trial lands in its own section with its noise ratio.
     assert "eps=0.350" in search_text and "97" in search_text
     assert "eps=0.250" in search_text
-    # SVG チャートが先頭に埋め込まれている
+    # The SVG chart is embedded at the top.
     assert "<svg" in search_text
-    assert "シルエットスコア" in search_text
-    assert "クラスタ数" in search_text
+    assert "Silhouette score" in search_text
+    assert "Cluster count" in search_text
 
 
 def test_html_format_produces_html_files(tmp_path: Path) -> None:
-    """output_format='html' で HTML ファイルが生成され、Markdown は生成されない."""
+    """output_format=.html. produces HTML only; no Markdown emitted."""
     df, summaries = _make_df_and_summaries()
     best = _make_best(trials=[
         {"algorithm": "kmeans", "params": {"k": 3}, "silhouette": 0.35,
@@ -235,16 +233,16 @@ def test_html_format_produces_html_files(tmp_path: Path) -> None:
 
     assert (tmp_path / "report.html").exists()
     assert (tmp_path / "parameter_search.html").exists()
-    # Markdown は生成しない
+    # No Markdown is emitted
     assert not (tmp_path / "report.md").exists()
     assert not (tmp_path / "parameter_search.md").exists()
 
     html = (tmp_path / "report.html").read_text(encoding="utf-8")
-    # 基本構造が含まれる
+    # Basic HTML structure is present
     assert "<!DOCTYPE html>" in html
     assert "<title>" in html
-    assert "<table>" in html  # 概要テーブルなど
-    # CSS がインライン埋め込み
+    assert "<table>" in html  # Summary table etc.
+    # CSS is embedded inline
     assert "<style>" in html
     assert ":root" in html
 
@@ -264,16 +262,16 @@ def test_both_format_produces_md_and_html_for_report(tmp_path: Path) -> None:
         output_format="both",
     )
 
-    # report は両形式
+    # report is emitted in both formats
     for name in ("report.md", "report.html"):
         assert (tmp_path / name).exists(), f"{name} が生成されていない"
-    # parameter_search は HTML のみ
+    # parameter_search is HTML-only
     assert (tmp_path / "parameter_search.html").exists()
     assert not (tmp_path / "parameter_search.md").exists()
 
 
 def test_report_uses_llm_summary_as_main_representative(tmp_path: Path) -> None:
-    """cluster_annotations が渡されたとき、要約がメイン代表テキストとして表示される."""
+    """When cluster_annotations are provided, the summary is used as the main rep text."""
     from src.namer import ClusterAnnotation
 
     df, summaries = _make_df_and_summaries()
@@ -304,20 +302,19 @@ def test_report_uses_llm_summary_as_main_representative(tmp_path: Path) -> None:
     )
 
     report_text = (tmp_path / "report.md").read_text(encoding="utf-8")
-    # 要約が代表テキストとして出ている
+    # The summary is shown as the representative text.
     assert "クラスタ0は A 系の問い合わせが多く見られます" in report_text
-    # 重心付近の実データセクションが常時可視で存在
-    assert "**重心に近い実データ" in report_text
-    # 折りたたみではなく直接可視
+    # The raw-data section is always visible (not collapsed in <details>).
+    assert "**Raw data near centroid" in report_text
     assert "<details>" not in report_text
-    # ラベルが見出しに反映
+    # The label appears in the cluster heading.
     assert "Aグループ" in report_text
 
 
 def test_clusters_csv_includes_summary_column_when_annotations_given(
     tmp_path: Path,
 ) -> None:
-    """cluster_annotations があると clusters.csv に summary 列が増える."""
+    """With annotations, clusters.csv gains a summary column."""
     from src.namer import ClusterAnnotation
 
     df, summaries = _make_df_and_summaries()
@@ -345,7 +342,7 @@ def test_clusters_csv_includes_summary_column_when_annotations_given(
 
 
 def test_clusters_csv_omits_summary_without_annotations(tmp_path: Path) -> None:
-    """annotations 無しの時は summary 列を追加しない（列が増えないこと）."""
+    """Without annotations, no summary column is added."""
     df, summaries = _make_df_and_summaries()
     best = _make_best(trials=[
         {"algorithm": "kmeans", "params": {"k": 3}, "silhouette": 0.35,
@@ -364,7 +361,7 @@ def test_clusters_csv_omits_summary_without_annotations(tmp_path: Path) -> None:
 
 
 def test_params_json_includes_search_metadata(tmp_path: Path) -> None:
-    """params.json に探索メタ情報（PCA・サンプル数・フィルタ閾値）が記録される."""
+    """params.json records search metadata (PCA, sample count, filter threshold)."""
     df, summaries = _make_df_and_summaries()
     best = _make_best(trials=[
         {"algorithm": "kmeans", "params": {"k": 3}, "silhouette": 0.35, "n_clusters": 3, "n_noise": 0},

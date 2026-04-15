@@ -1,9 +1,9 @@
-"""OpenAI Embeddings 取得 — キャッシュ付き.
+"""OpenAI Embeddings retrieval — with cache.
 
-責務:
-    - テキストの埋め込みをバッチで取得
-    - SHA-256 ハッシュをキーにローカルキャッシュ（pickle）
-    - レートリミット時は指数バックオフでリトライ
+Responsibilities:
+    - Fetch embeddings in batches.
+    - Cache per-text results locally (pickle, keyed by SHA-256 of the text).
+    - Retry with exponential backoff on rate-limit/API errors.
 """
 
 from __future__ import annotations
@@ -24,10 +24,10 @@ from tqdm import tqdm
 logger = logging.getLogger(__name__)
 
 DEFAULT_MODEL: str = "text-embedding-3-small"
-BATCH_SIZE: int = 100              # OpenAI の推奨バッチ上限の範囲内
+BATCH_SIZE: int = 100              # Within OpenAI's recommended batch size.
 MAX_RETRIES: int = 5
 BACKOFF_BASE_SEC: float = 2.0
-MAX_CONCURRENCY: int = 8           # 並列バッチ数（Tierに応じて増減）
+MAX_CONCURRENCY: int = 8           # Number of parallel batches. Scale with your tier.
 
 
 def get_embeddings(
@@ -36,27 +36,27 @@ def get_embeddings(
     model: str = DEFAULT_MODEL,
     api_key: str | None = None,
 ) -> np.ndarray:
-    """テキストリストの埋め込みベクトルを返す.
+    """Return the embedding vectors for the given texts.
 
     Args:
-        texts: 正規化済みテキスト列
-        cache_dir: キャッシュ保存ディレクトリ
-        model: 使用する OpenAI 埋め込みモデル
-        api_key: OPENAI_API_KEY を明示する場合
+        texts: normalised input texts
+        cache_dir: directory used to persist the embedding cache
+        model: OpenAI embedding model name
+        api_key: pass an API key explicitly; otherwise read from OPENAI_API_KEY
 
     Returns:
-        ndarray shape=(len(texts), D) — `texts` と同じ順序
+        `ndarray` with shape `(len(texts), D)`, matching the input order.
 
     Raises:
-        RuntimeError: APIキー未設定、またはリトライ上限超過
+        RuntimeError: no API key is available, or retries were exhausted
     """
     if not texts:
-        raise ValueError("空のテキストリストが渡されました")
+        raise ValueError("Received an empty text list")
 
     cache_path = _cache_path_for(Path(cache_dir), model)
     cache: dict[str, np.ndarray] = _load_cache(cache_path)
 
-    # まずキャッシュに無いテキストだけを API に問い合わせ
+    # Only ask the API about texts that aren't already cached.
     missing_indices: list[int] = []
     missing_texts: list[str] = []
     for idx, text in enumerate(texts):
@@ -67,7 +67,7 @@ def get_embeddings(
 
     if missing_texts:
         logger.info(
-            "埋め込みをAPI取得: %d件 (キャッシュヒット: %d件)",
+            "Fetching embeddings: %d from API (cache hits: %d)",
             len(missing_texts),
             len(texts) - len(missing_texts),
         )
@@ -77,9 +77,9 @@ def get_embeddings(
             cache[_hash_key(text)] = vec
         _save_cache(cache_path, cache)
     else:
-        logger.info("全 %d 件がキャッシュヒット", len(texts))
+        logger.info("All %d items served from cache", len(texts))
 
-    # キャッシュから全件を取り出して ndarray に組み立てる
+    # Assemble the full array in the original input order.
     vectors = np.stack([cache[_hash_key(t)] for t in texts], axis=0)
     return vectors.astype(np.float32, copy=False)
 
@@ -90,32 +90,33 @@ def get_embeddings(
 
 
 def _make_client(api_key: str | None) -> OpenAI:
-    """OpenAI クライアントを生成する.
+    """Build an OpenAI client.
 
     Raises:
-        RuntimeError: APIキーが取得できない場合
+        RuntimeError: when no API key can be resolved
     """
     key = api_key or os.getenv("OPENAI_API_KEY")
     if not key:
         raise RuntimeError(
-            "OPENAI_API_KEY が未設定です. .env または環境変数で指定してください"
+            "OPENAI_API_KEY is not set. Configure it in .env or the environment."
         )
     timeout = float(os.getenv("OPENAI_REQUEST_TIMEOUT", "60"))
     return OpenAI(api_key=key, timeout=timeout)
 
 
 def _fetch_batched(client: OpenAI, texts: list[str], model: str) -> list[np.ndarray]:
-    """テキストをバッチに分割して API 呼び出し（並列実行）.
+    """Send texts to the API in parallel batches.
 
-    バッチ順序はシーケンシャルに保ちつつ、複数バッチを ThreadPoolExecutor で
-    並行に発行する. OpenAI クライアントはスレッドセーフ.
+    Batches are sliced sequentially so ordering is deterministic. The actual
+    HTTP requests run concurrently via `ThreadPoolExecutor` (the OpenAI client
+    is thread-safe).
     """
-    # バッチを事前に切り出し（インデックス付き）
+    # Pre-slice batches with their starting indices so we can reassemble in order.
     batches: list[tuple[int, list[str]]] = []
     for start in range(0, len(texts), BATCH_SIZE):
         batches.append((start, texts[start : start + BATCH_SIZE]))
 
-    # 結果は元の順序で並べ直すため、インデックス付きで格納
+    # Store results keyed by their start index.
     results_by_start: dict[int, list[np.ndarray]] = {}
     results_lock = threading.Lock()
 
@@ -132,7 +133,7 @@ def _fetch_batched(client: OpenAI, texts: list[str], model: str) -> list[np.ndar
                     results_by_start[start] = batch_vectors
                 pbar.update(1)
 
-    # 開始インデックス昇順で結合
+    # Concatenate batches in their original order.
     results: list[np.ndarray] = []
     for start, _ in batches:
         results.extend(results_by_start[start])
@@ -142,16 +143,16 @@ def _fetch_batched(client: OpenAI, texts: list[str], model: str) -> list[np.ndar
 def _request_with_retry(
     client: OpenAI, batch: list[str], model: str
 ) -> list[np.ndarray]:
-    """指数バックオフ付きで embeddings.create を呼ぶ."""
+    """Call `embeddings.create` with exponential backoff on retriable errors."""
     for attempt in range(1, MAX_RETRIES + 1):
         try:
             response = client.embeddings.create(model=model, input=batch)
-            # response.data は入力順に並ぶ保証がある
+            # response.data is guaranteed to be in input order.
             return [np.asarray(item.embedding, dtype=np.float32) for item in response.data]
         except RateLimitError as exc:
             wait = BACKOFF_BASE_SEC * (2 ** (attempt - 1))
             logger.warning(
-                "レートリミット (attempt=%d/%d): %s — %.1f秒待機",
+                "Rate limited (attempt=%d/%d): %s — waiting %.1fs",
                 attempt,
                 MAX_RETRIES,
                 exc,
@@ -159,10 +160,10 @@ def _request_with_retry(
             )
             time.sleep(wait)
         except APIError as exc:
-            # 5xx など一時エラーもリトライ
+            # Retry 5xx / transient API errors too.
             wait = BACKOFF_BASE_SEC * (2 ** (attempt - 1))
             logger.warning(
-                "API一時エラー (attempt=%d/%d): %s — %.1f秒待機",
+                "Transient API error (attempt=%d/%d): %s — waiting %.1fs",
                 attempt,
                 MAX_RETRIES,
                 exc,
@@ -170,43 +171,45 @@ def _request_with_retry(
             )
             time.sleep(wait)
 
-    raise RuntimeError(f"OpenAI embeddings 取得がリトライ上限 {MAX_RETRIES} を超えました")
+    raise RuntimeError(
+        f"OpenAI embeddings retrieval exceeded {MAX_RETRIES} retries"
+    )
 
 
 def _hash_key(text: str) -> str:
-    """テキストを安定キー化."""
+    """Stable cache key for a single text."""
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
 
 def _cache_path_for(cache_dir: Path, model: str) -> Path:
-    """モデル別キャッシュファイルパス."""
+    """Per-model cache file path."""
     cache_dir.mkdir(parents=True, exist_ok=True)
-    # モデル名にスラッシュが入らない前提. 念のためサニタイズ
+    # Sanitize slashes in case of namespaced model names.
     safe_model = model.replace("/", "_")
     return cache_dir / f"embeddings_{safe_model}.pkl"
 
 
 def _load_cache(path: Path) -> dict[str, np.ndarray]:
-    """pickle キャッシュを読み込む. 無ければ空辞書."""
+    """Load the pickle cache. Returns an empty dict if missing/corrupt."""
     if not path.exists():
         return {}
     try:
         with path.open("rb") as f:
             cache = pickle.load(f)
         if not isinstance(cache, dict):
-            logger.warning("キャッシュ形式が不正です. 新規作成します: %s", path)
+            logger.warning("Cache has invalid format, rebuilding: %s", path)
             return {}
-        logger.debug("キャッシュ読込: %d エントリ", len(cache))
+        logger.debug("Cache loaded: %d entries", len(cache))
         return cache
     except (pickle.UnpicklingError, EOFError) as exc:
-        logger.warning("キャッシュ読込失敗 (%s). 破棄して新規作成します", exc)
+        logger.warning("Cache load failed (%s); discarding and rebuilding", exc)
         return {}
 
 
 def _save_cache(path: Path, cache: dict[str, np.ndarray]) -> None:
-    """pickle キャッシュを保存（原子的に差し替え）."""
+    """Persist the pickle cache using an atomic replace."""
     tmp = path.with_suffix(path.suffix + ".tmp")
     with tmp.open("wb") as f:
         pickle.dump(cache, f, protocol=pickle.HIGHEST_PROTOCOL)
     tmp.replace(path)
-    logger.debug("キャッシュ保存: %d エントリ -> %s", len(cache), path)
+    logger.debug("Cache saved: %d entries -> %s", len(cache), path)

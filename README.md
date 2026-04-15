@@ -2,103 +2,109 @@
 
 [![CI](https://github.com/Nakanokappei/voice-classifier/actions/workflows/ci.yml/badge.svg)](https://github.com/Nakanokappei/voice-classifier/actions/workflows/ci.yml)
 
-顧客の声（カスタマーサポート対応履歴CSV）を自動で分類し、
-クラスターごとの代表テキストと洞察レポートを生成する分析パイプライン。
+An analysis pipeline that auto-classifies customer-voice CSVs (support
+interactions, repair tickets, etc.) and emits per-cluster representative text
+and an insight report.
 
-## 特徴
+## Features
 
-- **埋め込み取得**: OpenAI `text-embedding-3-small` によるテキスト数値化（キャッシュ付き）
-- **自動チューニング**: K-Means / DBSCAN / HDBSCAN の候補を走査し、シルエットスコアで最適解を選択
-- **代表テキスト**: 各クラスタの重心に最も近い上位N件を抽出
-- **レポート出力**: Markdown 要約 + 全レコード付きCSV + 選択パラメータ JSON
+- **Embeddings**: OpenAI `text-embedding-3-small` by default, with a local cache.
+- **Auto-tuning**: sweeps KMeans / DBSCAN / HDBSCAN and picks the best config
+  by cosine silhouette.
+- **Representative text**: LLM summary of each cluster plus the raw
+  near-centroid rows for verification.
+- **Reports**: Markdown / HTML report, cluster-list CSV, annotated rows CSV,
+  and machine-readable params JSON.
 
-## 必要環境
+## Requirements
 
 - Python 3.10+
-- OpenAI APIキー
+- An OpenAI API key
 - Windows / macOS / Linux
 
-## セットアップ
+## Setup
 
 ```bash
-# 1. 仮想環境（任意）
+# 1. (Optional) virtual environment
 python -m venv .venv
 source .venv/bin/activate    # Windows: .venv\Scripts\activate
 
-# 2. 依存インストール
+# 2. Install dependencies
 pip install -r requirements.txt
 
-# 3. APIキーを設定
+# 3. Configure the API key
 cp .env.example .env
-# .env を開いて OPENAI_API_KEY を記入
+# Edit .env and fill in OPENAI_API_KEY
 ```
 
-> **Note (Windows)**: `hdbscan` はビルドに C コンパイラが必要な場合があります。
-> 失敗したら `pip install hdbscan --only-binary=:all:` を試してください。
+> **Note (Windows)**: `hdbscan` sometimes needs a C compiler to build.
+> If the install fails, try `pip install hdbscan --only-binary=:all:`.
 
-## 使い方
+## Usage
 
 ```bash
 python src/pipeline.py \
     --input data/input/sample.csv \
-    --text-col "対応内容"
+    --text-col "response_body"
 ```
 
-### 主要オプション
+### Key options
 
-| オプション | 既定 | 説明 |
+| Option | Default | Description |
 |---|---|---|
-| `--input` | 必須 | 入力CSVパス |
-| `--text-col` | 省略可 | 分類対象テキストの列名. 省略時は候補を対話的に提示 |
-| `--text-cols` | 省略可 | カンマ区切り複数列. 各列を `label: value` 形式で結合して埋め込み |
-| `--column-labels` | 省略可 | `列名=ラベル` の組をカンマ区切り. 複数列モードでのプレフィックス変更 |
-| `--output-dir` | `data/output` | 出力ディレクトリルート |
-| `--cache-dir` | `cache` | 埋め込みキャッシュ保存先 |
-| `--model` / `--embedding-model` | `text-embedding-3-small` | 埋め込みモデル. `text-embedding-3-large` 等に切替可. キャッシュはモデル別 |
-| `--top-k` | `5` | クラスタ代表テキストの抽出件数 |
-| `--min-clusters` | `2` | 探索するクラスタ数下限 |
-| `--max-clusters` | `20` | 探索するクラスタ数上限 |
-| `--name-clusters` / `--no-name-clusters` | **ON** | LLM で各クラスタに **短いラベル + 要約テキスト** を自動生成（既定で有効）. フロー: (1) データセット全体の意味を5件サンプルから推定 → (2) グラウンディング付きプロンプトで並列ラベル生成 → (3) ラベル重複を検出したらサイズが小さい側を差別化再生成（最大3周）. report.md では要約が「代表テキスト」として表示され、重心に近い実データ5件はその下に可視列挙. LLM 呼び出しをスキップする場合は `--no-name-clusters` |
-| `--name-model` / `--llm-model` | `gpt-5.4-nano` | クラスタ名生成に使う Chat モデル. GPT-5 系 / o-series / GPT-4o / GPT-3.5 系の API 仕様差（`max_completion_tokens` vs `max_tokens`、temperature 制約等）は自動吸収 |
-| `--format` | `md` | レポート形式. `md` / `html` / `both` |
+| `--input` | required | Input CSV path |
+| `--text-col` | optional | Column to embed in single-column mode. Prompts interactively when omitted. |
+| `--text-cols` | optional | Comma-separated column list. Joined as `label: value` per column and embedded. |
+| `--column-labels` | optional | Comma-separated `column=label` pairs used as prefixes in multi-column mode. |
+| `--output-dir` | `data/output` | Root output directory |
+| `--cache-dir` | `cache` | Embedding cache directory |
+| `--model` / `--embedding-model` | `text-embedding-3-small` | Embedding model. Can be swapped for `text-embedding-3-large` etc. Cache is per-model. |
+| `--top-k` | `5` | Representative rows per cluster |
+| `--min-clusters` | `2` | Lower bound for K (KMeans) |
+| `--max-clusters` | `20` | Upper bound for K (KMeans) |
+| `--name-clusters` / `--no-name-clusters` | **on** | LLM label + summary per cluster (default on). Flow: (1) infer dataset context from 5 samples → (2) grounded parallel label generation → (3) duplicate-label resolution (up to 3 passes). The summary is shown as "Representative text" in the report; raw near-centroid rows remain visible below as verification. Use `--no-name-clusters` to skip LLM calls. |
+| `--name-model` / `--llm-model` | `gpt-5.4-nano` | Chat model for cluster labelling. API differences across GPT-5 / o-series / GPT-4o / GPT-3.5 (e.g. `max_completion_tokens` vs `max_tokens`) are handled automatically. |
+| `--format` | `md` | Report format: `md` / `html` / `both` |
 
-### 使用例
+### Examples
 
 ```bash
-# 単一列
-python src/pipeline.py --input tickets.csv --text-col "対応内容"
+# Single column
+python src/pipeline.py --input tickets.csv --text-col "response_body"
 
-# 複数列結合（CKPS 互換）
+# Multi-column (CKPS-compatible)
 python src/pipeline.py --input tickets.csv \
     --text-cols "Ticket Subject,Ticket Description" \
     --column-labels "Ticket Subject=subject,Ticket Description=body"
 
-# LLM 自動ネーミング + HTML レポート
-python src/pipeline.py --input tickets.csv --text-col "対応内容" \
+# LLM labelling + HTML report
+python src/pipeline.py --input tickets.csv --text-col "response_body" \
     --name-clusters --format both
 ```
 
-## 出力
+## Output
 
-`data/output/YYYYMMDD_HHMMSS/` 配下に以下を生成:
+Per run, a directory under `data/output/YYYYMMDD_HHMMSS/` is created:
 
-- `report.md` / `report.html`           — クラスタリング結果（採用設定・クラスタ別代表テキスト）
-- `parameter_search.html`               — パラメータ探索の全貌（上部に 2軸グラフ + 全試行ランキング）
-- `clusters.csv`                         — **クラスタのリスト** (1行=1クラスタ): id, name, size, rep_1..N
-- `<入力ファイル名>_classified.csv`       — 元データ全行に `cluster_id` / `cluster_name` を付加
-- `params.json`                          — 採用アルゴリズム・パラメータ・スコア・探索メタ情報
-- `run.log`                              — 実行ログ（キャッシュヒット等の INFO レベルを常時記録）
+- `report.md` / `report.html` — clustering result (chosen config, per-cluster
+  representative text)
+- `parameter_search.html` — full search report with a dual-axis chart on top
+- `clusters.csv` — **cluster list** (one row per cluster): `id, name, size, summary, rep_1..N`
+- `<input>_classified.csv` — original data with `cluster_id` / `cluster_name`
+  appended
+- `params.json` — machine-readable algorithm, parameters, score, and metadata
+- `run.log` — execution log (INFO+ always captured, including cache hits)
 
-`report` は `--format md`（既定）/ `html` / `both` で切替可。
-`parameter_search` は常に HTML（チャート埋め込みのため）.
+`report` honours `--format md` (default) / `html` / `both`.
+`parameter_search` is always HTML (it embeds the chart).
 
-## ドキュメント
+## Documentation
 
-- [`docs/architecture.md`](docs/architecture.md) — モジュール設計・データフロー
-- [`docs/algorithm.md`](docs/algorithm.md) — チューニング戦略・スコア評価
-- [`docs/data-format.md`](docs/data-format.md) — 入力CSV仕様
+- [`docs/architecture.md`](docs/architecture.md) — module design and dataflow
+- [`docs/algorithm.md`](docs/algorithm.md) — tuning strategy and scoring
+- [`docs/data-format.md`](docs/data-format.md) — input CSV specification
 
-## テスト
+## Testing
 
 ```bash
 pytest

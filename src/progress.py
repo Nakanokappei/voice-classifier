@@ -1,9 +1,9 @@
-"""CLI 実行状況の表示ユーティリティ.
+"""CLI progress display utilities.
 
-責務:
-    - 各パイプラインステップの開始・完了を視覚的に表示
-    - 経過時間を自動計測してサマリに含める
-    - TTY 環境では色付き、非TTYではプレーンテキストに自動切替
+Responsibilities:
+    - Show the start/finish of every pipeline step with a phase marker.
+    - Measure elapsed time automatically and report it as part of the summary.
+    - Auto-downgrade to plain text when stderr is not a TTY.
 """
 
 from __future__ import annotations
@@ -14,7 +14,7 @@ from contextlib import contextmanager
 from typing import Iterator
 
 
-# ANSI カラーコード（サポート環境のみ使用）
+# ANSI colour codes (only emitted when stderr is a TTY).
 class _Color:
     RESET = "\033[0m"
     BOLD = "\033[1m"
@@ -26,19 +26,19 @@ class _Color:
 
 
 def _supports_color() -> bool:
-    """stderr が TTY で、環境が色表示をサポートするか."""
+    """True when stderr is a TTY (assumed to support ANSI)."""
     return sys.stderr.isatty()
 
 
 def _colorize(text: str, color: str) -> str:
-    """色付け（非対応環境ではそのまま）."""
+    """Wrap `text` in ANSI codes when the terminal supports it."""
     if _supports_color():
         return f"{color}{text}{_Color.RESET}"
     return text
 
 
 class ProgressReporter:
-    """ステップ進行表示. `[current/total] <description>` 形式で出力."""
+    """Phase-by-phase progress reporter. Prints `[current/total] <description>`."""
 
     def __init__(self, total_steps: int) -> None:
         self.total_steps = total_steps
@@ -58,13 +58,13 @@ class ProgressReporter:
 
     @contextmanager
     def step(self, description: str) -> Iterator["_StepContext"]:
-        """ステップ開始〜終了をコンテキストマネージャで記述.
+        """Run a step as a context manager; auto-reports start and finish.
 
-        使い方::
+        Usage::
 
-            with reporter.step("CSVを読み込み中") as step:
+            with reporter.step("Loading CSV") as step:
                 df = load_csv(...)
-                step.detail(f"{len(df)}件読込")
+                step.set_summary(f"{len(df)} rows")
         """
         self.current_step += 1
         self._phase_start = time.monotonic()
@@ -79,7 +79,7 @@ class ProgressReporter:
         except BaseException:
             elapsed = time.monotonic() - self._phase_start
             print(
-                f"      {self._cross_mark()} 失敗 ({elapsed:.1f}秒)",
+                f"      {self._cross_mark()} failed ({elapsed:.1f}s)",
                 file=sys.stderr,
                 flush=True,
             )
@@ -88,17 +88,17 @@ class ProgressReporter:
             elapsed = time.monotonic() - self._phase_start
             suffix = f" {ctx.summary}" if ctx.summary else ""
             print(
-                f"      {self._check_mark()} 完了 ({elapsed:.1f}秒){suffix}",
+                f"      {self._check_mark()} done ({elapsed:.1f}s){suffix}",
                 file=sys.stderr,
                 flush=True,
             )
 
     def total_elapsed(self) -> float:
-        """開始からの経過秒数."""
+        """Seconds elapsed since the ProgressReporter was created."""
         return time.monotonic() - self._overall_start
 
     def banner(self, title: str) -> None:
-        """目立つ見出しを表示."""
+        """Print a prominent title banner at the start of a run."""
         bar = "=" * 60
         print(file=sys.stderr)
         print(_colorize(bar, _Color.DIM), file=sys.stderr)
@@ -106,12 +106,12 @@ class ProgressReporter:
         print(_colorize(bar, _Color.DIM), file=sys.stderr, flush=True)
 
     def footer(self, message: str) -> None:
-        """完了時のフッタ."""
+        """Print the final footer once all steps have finished."""
         elapsed = self.total_elapsed()
         print(file=sys.stderr)
         print(
             _colorize(
-                f"全工程完了: {message} (総経過 {elapsed:.1f}秒)",
+                f"All steps complete: {message} (total {elapsed:.1f}s)",
                 _Color.BOLD + _Color.GREEN,
             ),
             file=sys.stderr,
@@ -120,16 +120,16 @@ class ProgressReporter:
 
 
 class _StepContext:
-    """ステップ内でサブ情報を記録するハンドル."""
+    """Handle handed to the `step` block so callers can add detail info."""
 
     def __init__(self, owner: ProgressReporter) -> None:
         self._owner = owner
         self.summary: str = ""
 
     def set_summary(self, text: str) -> None:
-        """ステップ完了時に `完了` 行の後ろに付くサマリ文."""
+        """Text appended to the ✓ line once the step finishes."""
         self.summary = text
 
     def detail(self, text: str) -> None:
-        """実行中の補足情報をインデント付きで表示."""
+        """Print an indented sub-line mid-step."""
         print(f"      {_colorize('·', _Color.DIM)} {text}", file=sys.stderr, flush=True)
