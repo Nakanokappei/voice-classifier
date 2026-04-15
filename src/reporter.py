@@ -749,6 +749,18 @@ def _build_parameter_search_md(
         else:
             accepted.append(enriched)
 
+    # Build a "chart rank" map that mirrors the SVG chart's bar order
+    # (all scored trials sorted by descending silhouette). The Accepted
+    # Candidates table then shows this rank so readers can look up a row
+    # on the chart by number. Chart rank differs from table rank because
+    # the table is sorted by the target-aware score, not silhouette.
+    chart_trials = [t for t in best.all_trials if t["silhouette"] is not None]
+    chart_trials.sort(key=lambda t: t["silhouette"], reverse=True)
+    chart_rank_by_key: dict[tuple, int] = {
+        (t["algorithm"], _freeze_params(t["params"])): idx
+        for idx, t in enumerate(chart_trials, start=1)
+    }
+
     # Accepted candidate ranking — sorted by the target-aware score so the
     # table reflects the actual selection order, not a generic silhouette sort.
     sweep_size = best.sweep_sample_size or sample_size
@@ -765,7 +777,10 @@ def _build_parameter_search_md(
         f"Ranking follows the selected target (`{active_target}`). The "
         "three right-most columns show what each trial would have scored "
         "under every target, so you can see how the choice would differ "
-        "for another downstream use case."
+        "for another downstream use case. The **Chart #** column gives the "
+        "trial's position on the silhouette chart above, so you can look "
+        "up any row on the bar chart by number (the chart is sorted by "
+        "silhouette, not by target score, so the two orderings differ)."
     )
     lines.append("")
     if not accepted:
@@ -773,11 +788,11 @@ def _build_parameter_search_md(
         lines.append("")
     else:
         lines.append(
-            "| Rank | Method | Parameters | Clusters | Noise (ratio) | "
+            "| Rank | Chart # | Method | Parameters | Clusters | Noise (ratio) | "
             "Max share | Silhouette | faq | chatbot | insight | Status |"
         )
         lines.append(
-            "|---:|---|---|---:|---|---:|---:|---:|---:|---:|:---:|"
+            "|---:|---:|---|---|---:|---|---:|---:|---:|---:|---:|:---:|"
         )
         winner_key = (best.algorithm, _freeze_params(best.params))
         for rank, trial in enumerate(accepted, start=1):
@@ -790,8 +805,12 @@ def _build_parameter_search_md(
             faq_s = tuner_module.score_trial_under_target(trial, sweep_size, "faq")
             bot_s = tuner_module.score_trial_under_target(trial, sweep_size, "chatbot")
             ins_s = tuner_module.score_trial_under_target(trial, sweep_size, "insight")
+            # Chart rank may be missing for degenerate rows; render an em dash
+            # in that case. For accepted trials it should always be present.
+            chart_no = chart_rank_by_key.get(key)
+            chart_no_str = str(chart_no) if chart_no is not None else "—"
             lines.append(
-                f"| {rank} | {trial['algorithm']} | "
+                f"| {rank} | {chart_no_str} | {trial['algorithm']} | "
                 f"`{_format_params(trial['params'])}` "
                 f"| {trial['n_clusters']} | {noise_str} "
                 f"| {max_share * 100:.1f}% "
@@ -814,13 +833,16 @@ def _build_parameter_search_md(
         )
         lines.append("")
         lines.append(
-            "| Method | Parameters | Clusters | Noise (ratio) | Silhouette |"
+            "| Chart # | Method | Parameters | Clusters | Noise (ratio) | Silhouette |"
         )
-        lines.append("|---|---|---:|---|---:|")
+        lines.append("|---:|---|---|---:|---|---:|")
         for trial in rejected_noise:
             noise_str = f"{trial['n_noise']} ({trial['noise_ratio'] * 100:.1f}%)"
+            key = (trial["algorithm"], _freeze_params(trial["params"]))
+            chart_no = chart_rank_by_key.get(key)
+            chart_no_str = str(chart_no) if chart_no is not None else "—"
             lines.append(
-                f"| {trial['algorithm']} | "
+                f"| {chart_no_str} | {trial['algorithm']} | "
                 f"`{_format_params(trial['params'])}` "
                 f"| {trial['n_clusters']} | {noise_str} "
                 f"| {trial['silhouette']:.4f} |"
