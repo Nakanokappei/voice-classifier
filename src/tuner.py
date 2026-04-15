@@ -80,7 +80,10 @@ class BestConfig:
         labels: 全サンプルに対するクラスタラベル（ノイズは -1）
         n_clusters: 有効なクラスタ数（ノイズを除く）
         n_noise: ノイズ点数
-        all_trials: 参考. スイープで評価した全候補のスコアログ
+        all_trials: スイープで評価した全候補のスコアログ（フィルタ前）
+        sweep_sample_size: スイープに使った点数（ノイズ率算出用）
+        dim_before_pca: PCA 前の次元（PCA 非適用時は削減後次元と一致）
+        dim_after_pca: PCA 後の次元
     """
 
     algorithm: Algorithm
@@ -90,6 +93,9 @@ class BestConfig:
     n_clusters: int
     n_noise: int
     all_trials: list[dict[str, Any]] = field(default_factory=list)
+    sweep_sample_size: int = 0
+    dim_before_pca: int = 0
+    dim_after_pca: int = 0
 
     @property
     def quality_flag(self) -> Literal["good", "warn", "poor"]:
@@ -99,6 +105,11 @@ class BestConfig:
         if self.silhouette >= SCORE_WARN:
             return "warn"
         return "poor"
+
+    @property
+    def max_noise_ratio(self) -> float:
+        """採用時に使用したノイズ率フィルタ閾値（レポート表示用）."""
+        return MAX_NOISE_RATIO_FOR_SELECTION
 
 
 def find_best_clustering(
@@ -222,6 +233,9 @@ def find_best_clustering(
         n_clusters=n_clusters,
         n_noise=n_noise,
         all_trials=[_trial_log(t) for t in trials],
+        sweep_sample_size=int(sample.shape[0]),
+        dim_before_pca=int(embeddings.shape[1]),
+        dim_after_pca=int(reduced.shape[1]),
     )
 
 

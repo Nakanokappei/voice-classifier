@@ -61,9 +61,10 @@ python src/pipeline.py \
 
 `data/output/YYYYMMDD_HHMMSS/` 配下に以下を生成:
 
-- `report.md`       — クラスター数・スコア・代表テキスト一覧
-- `clusters.csv`    — 入力CSV + `cluster_id` 付与
-- `params.json`     — 選択されたアルゴリズム・パラメータ・スコア
+- `report.md`             — クラスタリング結果（採用設定・クラスタ別代表テキスト）
+- `parameter_search.md`   — パラメータ探索の全貌（採用/除外理由・全試行ランキング）
+- `clusters.csv`          — 入力CSV + `cluster_id` 付与
+- `params.json`           — 採用アルゴリズム・パラメータ・スコア・探索メタ情報
 
 ## ドキュメント
 
