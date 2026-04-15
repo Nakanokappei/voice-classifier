@@ -124,6 +124,7 @@ data/output/20260416_012345/
 | `--top-k N` | `5` | `rep_*` に抽出する件数 |
 | `--min-clusters N` | `2` | K の下限 |
 | `--max-clusters N` | `20` | K の上限 |
+| `--target faq|chatbot|insight` | `faq` | 目的別の粒度最適化. `faq`=30〜80クラスタ（FAQページ向き）、`chatbot`=50〜150（意図分岐向き）、`insight`=シルエット最大（探索向き） |
 | `--name-clusters` / `--no-name-clusters` | ON | LLM ラベル生成の ON/OFF |
 | `--name-model NAME` | `gpt-5.4-nano` | ラベル生成用 Chat モデル |
 | `--format md|html|both` | `md` | `report.*` の形式 |

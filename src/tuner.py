@@ -55,6 +55,34 @@ except ImportError:  # pragma: no cover
 
 Algorithm = Literal["kmeans", "hdbscan", "leiden"]
 
+# What the user is optimising for. Different downstream uses want different
+# granularities: FAQ pages read well at 30-80 clusters; chatbot intent trees
+# want more (50-150); raw insight investigations often benefit from the most
+# discriminating partition regardless of cluster count ("insight").
+Target = Literal["faq", "chatbot", "insight"]
+DEFAULT_TARGET: Target = "faq"
+
+# Per-target configuration: the sweet-spot cluster-count range, and a ceiling
+# on how much of the data any single cluster is allowed to absorb. A single
+# cluster with >15% of the data tends to collapse distinct topics that each
+# deserved their own FAQ entry.
+_TARGET_PROFILES: dict[Target, dict[str, object]] = {
+    "faq": {
+        "cluster_range": (30, 80),
+        "max_cluster_share": 0.10,
+    },
+    "chatbot": {
+        "cluster_range": (50, 150),
+        "max_cluster_share": 0.07,
+    },
+    "insight": {
+        # No bias — pure silhouette maximisation, preserving the legacy
+        # behaviour for exploratory analysis.
+        "cluster_range": None,
+        "max_cluster_share": 1.0,
+    },
+}
+
 # Number of points used to fit each candidate during the sweep.
 #
 # Measurement (data/input/customer_support_tickets.csv, 14k unique rows):
@@ -147,6 +175,7 @@ class BestConfig:
     sweep_sample_size: int = 0
     dim_before_pca: int = 0
     dim_after_pca: int = 0
+    target: Target = DEFAULT_TARGET
 
     @property
     def quality_flag(self) -> Literal["good", "warn", "poor"]:
@@ -172,11 +201,17 @@ def find_best_clustering(
     embeddings: np.ndarray,
     min_clusters: int = 2,
     max_clusters: int = 20,
+    target: Target = DEFAULT_TARGET,
 ) -> BestConfig:
     """Search for the best clustering configuration over the embedding matrix.
 
     Phase 1: sweep every candidate on a ``SWEEP_SAMPLE_SIZE`` subsample and score it.
     Phase 2: re-run the winning (algorithm, params) on the full data to label it.
+
+    The ``target`` argument picks the selection criterion:
+        - ``"faq"``     prefers 30-80 clusters, no single cluster > 10% share.
+        - ``"chatbot"`` prefers 50-150 clusters, no single cluster > 7% share.
+        - ``"insight"`` maximises silhouette with no cluster-count bias.
     """
     n_samples = embeddings.shape[0]
     if n_samples < max(2, min_clusters):
@@ -214,10 +249,11 @@ def find_best_clustering(
 
     trials = _run_all_sweeps(sample, min_clusters, max_clusters)
 
-    winner = _select_winner(trials, sample_size=sample.shape[0])
+    winner = _select_winner(trials, sample_size=sample.shape[0], target=target)
     logger.info(
-        "phase1 winner: %s params=%s sample_score=%.4f",
-        winner["algorithm"], winner["params"], winner["silhouette"],
+        "phase1 winner (target=%s): %s params=%s sample_score=%.4f n_clusters=%d",
+        target, winner["algorithm"], winner["params"],
+        winner["silhouette"], winner["n_clusters"],
     )
 
     # Phase 2: apply the winning config to the full (PCA-reduced) data.
@@ -256,6 +292,7 @@ def find_best_clustering(
         sweep_sample_size=int(sample.shape[0]),
         dim_before_pca=int(embeddings.shape[1]),
         dim_after_pca=int(reduced.shape[1]),
+        target=target,
     )
 
 
@@ -275,21 +312,34 @@ def _run_all_sweeps(
 def _select_winner(
     trials: list[dict[str, Any]],
     sample_size: int,
+    target: Target = DEFAULT_TARGET,
 ) -> dict[str, Any]:
-    """Apply the usability filter and pick the highest-scoring candidate.
+    """Apply the usability filter and pick the best candidate for ``target``.
+
+    Scoring:
+        - ``insight`` uses raw silhouette, matching the legacy behaviour.
+        - ``faq`` / ``chatbot`` multiply silhouette by a granularity factor
+          (peaking at the target cluster-count range) and a share penalty
+          (down-weighting candidates where any single cluster absorbs too
+          much of the data). Details in `_target_score`.
 
     If every candidate trips the noise-ratio filter, log a warning and fall
     back to scoring alone so the pipeline still produces output.
     """
+
     def _has_score(t: dict[str, Any]) -> bool:
         return t["silhouette"] is not None and t["silhouette"] > -1.0
 
+    def _score(t: dict[str, Any]) -> float:
+        return _target_score(t, sample_size=sample_size, target=target)
+
     within_noise_budget = [
         t for t in trials
-        if _has_score(t) and (t["n_noise"] / sample_size) <= MAX_NOISE_RATIO_FOR_SELECTION
+        if _has_score(t)
+        and (t["n_noise"] / sample_size) <= MAX_NOISE_RATIO_FOR_SELECTION
     ]
     if within_noise_budget:
-        return max(within_noise_budget, key=lambda t: t["silhouette"])
+        return max(within_noise_budget, key=_score)
 
     logger.warning(
         "All candidates have noise ratio > %.0f%%. Relaxing the filter.",
@@ -298,7 +348,92 @@ def _select_winner(
     fallback = [t for t in trials if _has_score(t)]
     if not fallback:
         raise RuntimeError("No valid clustering candidate was produced")
-    return max(fallback, key=lambda t: t["silhouette"])
+    return max(fallback, key=_score)
+
+
+def _target_score(
+    trial: dict[str, Any],
+    *,
+    sample_size: int,
+    target: Target,
+) -> float:
+    """Compute the target-aware selection score for one candidate.
+
+    The returned value is a positive-only composite; higher is better.
+
+    The formula is::
+
+        score = max(silhouette, 0.05)
+              * granularity_fit(n_clusters, target)
+              * share_penalty(max_cluster_share, target)
+
+    - A tiny silhouette floor (0.05) keeps candidates comparable even when
+      the embedding space produces very small silhouettes — at that point
+      it's the granularity and share factors that should choose between
+      similarly-flat candidates.
+    - ``granularity_fit`` is 1.0 inside the target cluster-count range, and
+      falls off outside. Under-clustering is penalised more than
+      over-clustering because under-clustered FAQ pages are unusable while
+      slightly-over-clustered ones can be merged later.
+    - ``share_penalty`` is 1.0 when the max cluster share is within budget
+      and drops toward 0 as the dominant cluster swallows more data.
+    """
+    sil = trial["silhouette"] or 0.0
+    n_clusters = int(trial["n_clusters"])
+    max_share = _max_cluster_share(trial, sample_size)
+
+    base = max(sil, 0.05)
+    granularity = _granularity_fit(n_clusters, target)
+    share = _share_penalty(max_share, target)
+    return base * granularity * share
+
+
+def _max_cluster_share(trial: dict[str, Any], sample_size: int) -> float:
+    """Share of the largest non-noise cluster in the sample."""
+    labels = trial.get("sample_labels")
+    if labels is None or sample_size <= 0:
+        return 0.0
+    from collections import Counter
+
+    counts = Counter(int(label) for label in labels if int(label) != -1)
+    if not counts:
+        return 0.0
+    return max(counts.values()) / sample_size
+
+
+def _granularity_fit(n_clusters: int, target: Target) -> float:
+    """How well does this cluster count match the target range?
+
+    Returns a multiplier in ``[0.1, 1.0]``:
+        - 1.0 when ``n_clusters`` is inside the target range.
+        - Linearly declining outside, with a steeper slope below the range
+          (under-clustering is worse for FAQ / chatbot use cases).
+    """
+    profile = _TARGET_PROFILES[target]
+    cluster_range = profile["cluster_range"]
+    if cluster_range is None:
+        return 1.0  # insight: no bias
+    low, high = cluster_range  # type: ignore[misc]
+
+    if low <= n_clusters <= high:
+        return 1.0
+    if n_clusters < low:
+        # Steep penalty — under-clustering is the real failure mode.
+        return max(0.1, n_clusters / low)
+    # Over-clustering: gentler penalty because merging is recoverable.
+    return max(0.3, 1.0 - (n_clusters - high) / (high * 2.5))
+
+
+def _share_penalty(max_share: float, target: Target) -> float:
+    """Down-weight candidates where a single cluster dominates."""
+    profile = _TARGET_PROFILES[target]
+    budget = float(profile["max_cluster_share"])  # type: ignore[arg-type]
+    if max_share <= budget:
+        return 1.0
+    # Taper off as we exceed the budget; floor at 0.2 so a single-dominant
+    # but otherwise-reasonable candidate can still win when nothing better
+    # exists.
+    return max(0.2, 1.0 - (max_share - budget) * 3.0)
 
 
 # ---------------------------------------------------------------------------

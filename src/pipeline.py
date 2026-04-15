@@ -109,6 +109,19 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--min-clusters", type=int, default=2, help="Lower bound for K (KMeans)")
     parser.add_argument("--max-clusters", type=int, default=20, help="Upper bound for K (KMeans)")
     parser.add_argument(
+        "--target",
+        default=tuner.DEFAULT_TARGET,
+        choices=["faq", "chatbot", "insight"],
+        help=(
+            "Which downstream use case the clustering should optimise for. "
+            "'faq' (default) prefers 30-80 clusters with no single cluster "
+            "over 10% of data — good for FAQ pages and chatbot response "
+            "templates. 'chatbot' targets 50-150 finer intents. 'insight' "
+            "maximises raw silhouette without any cluster-count bias — use "
+            "for exploratory analysis."
+        ),
+    )
+    parser.add_argument(
         "--name-clusters",
         action=argparse.BooleanOptionalAction,
         default=True,
@@ -214,12 +227,14 @@ def run(args: argparse.Namespace) -> Path:
     # Step 3: Clustering sweep and selection.
     with reporter_ui.step("Search clustering candidates") as step:
         step.detail(
-            f"KMeans/HDBSCAN/Leiden sweep on {tuner.SWEEP_SAMPLE_SIZE} samples"
+            f"KMeans/HDBSCAN/Leiden sweep on {tuner.SWEEP_SAMPLE_SIZE} samples "
+            f"(target={args.target})"
         )
         best = tuner.find_best_clustering(
             embeddings,
             min_clusters=args.min_clusters,
             max_clusters=args.max_clusters,
+            target=args.target,
         )
         step.set_summary(
             f"→ selected {best.algorithm} "

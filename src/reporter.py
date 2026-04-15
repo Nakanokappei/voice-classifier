@@ -260,6 +260,7 @@ def _write_params_json(
         "quality": best.quality_flag,
         "n_clusters": best.n_clusters,
         "n_noise": best.n_noise,
+        "target": best.target,
         "sweep_sample_size": best.sweep_sample_size,
         "dim_before_pca": best.dim_before_pca,
         "dim_after_pca": best.dim_after_pca,
@@ -286,6 +287,78 @@ def _write_params_json(
 # ---------------------------------------------------------------------------
 # Clustering result report (Markdown body)
 # ---------------------------------------------------------------------------
+
+
+def _build_faq_metrics_table(
+    df: pd.DataFrame,
+    summaries: list[ClusterSummary],
+) -> list[str]:
+    """Generate the "FAQ automation potential" markdown section.
+
+    The block quantifies:
+        - Top-K cumulative coverage (how much of the inbox a short top-N
+          list would automate).
+        - Noise volume (the tail that can't be auto-answered).
+        - Candidate count at common volume thresholds (≥ 20, ≥ 50 rows).
+
+    Report authors/analysts use this to judge whether the chosen
+    granularity is actionable without digging into per-cluster details.
+    """
+    total_rows = len(df)
+    non_noise = sorted(
+        [s for s in summaries if s.cluster_id != NOISE_LABEL],
+        key=lambda s: s.size,
+        reverse=True,
+    )
+    noise = next((s for s in summaries if s.cluster_id == NOISE_LABEL), None)
+    noise_size = noise.size if noise else 0
+
+    lines: list[str] = []
+    lines.append("## FAQ Automation Potential")
+    lines.append("")
+    lines.append(
+        "How much of the inbox can be handled by the top-N cluster templates, "
+        "and how many clusters are large enough to be worth templating at all."
+    )
+    lines.append("")
+
+    if total_rows == 0 or not non_noise:
+        lines.append("_Not enough clustered data to compute coverage._")
+        lines.append("")
+        return lines
+
+    # Cumulative coverage table.
+    sizes = [s.size for s in non_noise]
+    cumulative: list[int] = []
+    running = 0
+    for sz in sizes:
+        running += sz
+        cumulative.append(running)
+
+    lines.append("| Top N clusters | Rows covered | % of total |")
+    lines.append("|---:|---:|---:|")
+    milestones = [3, 5, 10, 20, 50, len(non_noise)]
+    printed: set[int] = set()
+    for k in milestones:
+        if k <= 0 or k > len(non_noise) or k in printed:
+            continue
+        printed.add(k)
+        covered = cumulative[k - 1]
+        share = covered / total_rows * 100
+        lines.append(f"| {k} | {covered:,} | {share:.1f}% |")
+    lines.append("")
+
+    # Threshold-based candidate counts.
+    large = sum(1 for sz in sizes if sz >= 50)
+    medium = sum(1 for sz in sizes if sz >= 20)
+    lines.append(f"- **Clusters with ≥ 50 rows**: {large} (strong FAQ candidates)")
+    lines.append(f"- **Clusters with ≥ 20 rows**: {medium} (viable FAQ candidates)")
+    lines.append(
+        f"- **Noise (not automatable as-is)**: {noise_size:,} rows "
+        f"({noise_size * 100 / total_rows:.1f}%)"
+    )
+    lines.append("")
+    return lines
 
 
 def _build_clustering_report_md(
@@ -336,12 +409,17 @@ def _build_clustering_report_md(
     )
     lines.append(f"| Cluster count | {best.n_clusters} |")
     lines.append(f"| Noise count | {best.n_noise} |")
+    lines.append(f"| Optimisation target | `{best.target}` |")
     lines.append("")
     lines.append(
         "See [`parameter_search.html`](parameter_search.html) for the full "
         "search log (all candidates with selection / rejection reasoning)."
     )
     lines.append("")
+
+    # Insert the FAQ / actionability block before the per-cluster detail so it
+    # is visible without scrolling to the end of a long report.
+    lines.extend(_build_faq_metrics_table(df, summaries))
 
     # Per-cluster detail.
     lines.append("## Cluster Detail")

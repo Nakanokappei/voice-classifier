@@ -57,6 +57,7 @@ first candidate is auto-selected.
 | `--top-k` | `5` | Number of near-centroid representative rows per cluster. |
 | `--min-clusters` | `2` | Lower bound for K (KMeans sweep). |
 | `--max-clusters` | `20` | Upper bound for K. |
+| `--target` | `faq` | Which downstream use case the clustering should optimise for. `faq` prefers 30-80 clusters with max share ≤ 10%. `chatbot` targets 50-150 finer intents with share ≤ 7%. `insight` maximises silhouette with no cluster-count bias. |
 | `--name-clusters` / `--no-name-clusters` | on | Toggle LLM labelling + summarisation. |
 | `--name-model` / `--llm-model` | `gpt-5.4-nano` | OpenAI chat model used for labelling. API-spec differences across model families are absorbed automatically. |
 | `--format` | `md` | Report format for `report.*`. `parameter_search.html` is always emitted regardless. |

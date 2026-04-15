@@ -132,6 +132,7 @@ Your original data, plus a `cluster_id` column and, when available, a
 | `--top-k N` | `5` | Rows per cluster in `rep_*` |
 | `--min-clusters N` | `2` | Lower bound for K |
 | `--max-clusters N` | `20` | Upper bound for K |
+| `--target faq|chatbot|insight` | `faq` | Downstream-use-case-driven granularity. `faq`=30-80 clusters, `chatbot`=50-150 intents, `insight`=maximise silhouette |
 | `--name-clusters` / `--no-name-clusters` | on | Toggle LLM labelling |
 | `--name-model NAME` | `gpt-5.4-nano` | Chat model for labelling |
 | `--format md|html|both` | `md` | Format for `report.*` |
