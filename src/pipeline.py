@@ -156,17 +156,25 @@ def run(args: argparse.Namespace) -> Path:
 
     _configure_logging(args.log_level, run_dir / "run.log")
 
-    # Resolve column selection.
+    # Resolve column selection: CLI flags first, otherwise interactive.
     text_cols, column_labels = _parse_column_specs(args)
     if text_cols:
-        args.text_col = None  # multi-column mode
+        args.text_col = None  # multi-column mode from CLI
         display_cols = ", ".join(text_cols)
         logger.info("Multi-column mode: %s", display_cols)
+    elif args.text_col:
+        display_cols = args.text_col
     else:
-        # Interactive prompt if no column is specified.
-        text_col = args.text_col or _resolve_text_col_interactively(args.input)
-        args.text_col = text_col
-        display_cols = text_col
+        # No CLI flag given — prompt interactively; allow multi-selection.
+        picked_single, picked_multi = _resolve_text_cols_interactively(args.input)
+        if picked_multi:
+            text_cols = picked_multi
+            args.text_col = None
+            display_cols = ", ".join(text_cols)
+            logger.info("Multi-column mode (interactive): %s", display_cols)
+        else:
+            args.text_col = picked_single
+            display_cols = picked_single
 
     logger.info("=== voice-classifier start ===")
     logger.info("input=%s cols=%s output=%s", args.input, display_cols, run_dir)
@@ -364,18 +372,32 @@ def _parse_column_specs(
     return text_cols, labels
 
 
-def _resolve_text_col_interactively(input_path: Path) -> str:
-    """Analyse the CSV and prompt the user to pick a text column.
+def _resolve_text_cols_interactively(
+    input_path: Path,
+) -> tuple[str | None, list[str] | None]:
+    """Analyse the CSV and prompt the user to pick one or more text columns.
 
-    - A single candidate is auto-confirmed.
-    - With several candidates, prompt for a number; Enter picks the first.
-    - In non-interactive environments, the first candidate is picked.
+    Accepts a variety of selection syntaxes at the prompt:
+
+        1            single column
+        1,3,5        multiple (comma-separated)
+        1;3;5        multiple (semicolon-separated)
+        1-3          range (inclusive)
+        1-3,5        mixed — expands to 1, 2, 3, 5
+
+    Multi-column selections preserve the order the user typed (not sorted),
+    matching the multi-column embedding contract.
+
+    Returns:
+        (text_col, None) for a single-column choice, or
+        (None, text_cols) for a multi-column choice.
+        Both None when no candidate was available (caller raises).
     """
     candidates = loader.suggest_text_columns(input_path)
     if not candidates:
         raise ValueError(
             f"No text column candidates found in {input_path}. "
-            "Specify one explicitly with --text-col."
+            "Specify one explicitly with --text-col or --text-cols."
         )
 
     print("\nText column candidates:", file=sys.stderr)
@@ -394,7 +416,7 @@ def _resolve_text_col_interactively(input_path: Path) -> str:
     if len(candidates) == 1:
         chosen = candidates[0]
         print(f"\nOnly one candidate — picking: {chosen.name}\n", file=sys.stderr)
-        return chosen.name
+        return chosen.name, None
 
     default = candidates[0]
     if not sys.stdin.isatty():
@@ -402,18 +424,80 @@ def _resolve_text_col_interactively(input_path: Path) -> str:
             f"\nNon-interactive mode: picking the top candidate {default.name}\n",
             file=sys.stderr,
         )
-        return default.name
+        return default.name, None
 
+    prompt = (
+        f"\nSelect columns from [1-{len(candidates)}]. "
+        "Examples: '1' / '1,3' / '1;3' / '1-3' / '1-2,4'. "
+        f"Enter for default [{default.name}]: "
+    )
     while True:
-        raw = input(f"\nSelect [1-{len(candidates)}], Enter for [{default.name}]: ")
-        choice = raw.strip()
-        if not choice:
-            return default.name
-        if choice.isdigit():
-            idx = int(choice)
-            if 1 <= idx <= len(candidates):
-                return candidates[idx - 1].name
-        print("Invalid input", file=sys.stderr)
+        raw = input(prompt).strip()
+        if not raw:
+            return default.name, None
+
+        try:
+            indices = _parse_column_selection(raw, len(candidates))
+        except ValueError as exc:
+            print(f"Invalid input: {exc}", file=sys.stderr)
+            continue
+
+        if len(indices) == 1:
+            return candidates[indices[0] - 1].name, None
+        names = [candidates[i - 1].name for i in indices]
+        print(
+            f"Selected {len(names)} columns (in order): {', '.join(names)}\n",
+            file=sys.stderr,
+        )
+        return None, names
+
+
+def _parse_column_selection(raw: str, max_index: int) -> list[int]:
+    """Parse a selection string into a list of 1-based indices.
+
+    Grammar:
+        selection := token (sep token)*
+        sep       := ',' | ';'
+        token     := integer | range
+        range     := integer '-' integer    (inclusive, ascending)
+
+    Returns indices in the order they were specified, deduplicated while
+    preserving the first occurrence. Raises ValueError on any token that
+    can't be parsed or falls outside ``[1, max_index]``.
+    """
+    # Treat ';' as an alias for ','; then split and strip.
+    tokens = [t.strip() for t in raw.replace(";", ",").split(",") if t.strip()]
+    if not tokens:
+        raise ValueError("no numbers provided")
+
+    result: list[int] = []
+    seen: set[int] = set()
+
+    def _accept(index: int) -> None:
+        if not (1 <= index <= max_index):
+            raise ValueError(f"{index} is out of range [1-{max_index}]")
+        if index not in seen:
+            seen.add(index)
+            result.append(index)
+
+    for tok in tokens:
+        if "-" in tok:
+            parts = tok.split("-", 1)
+            if len(parts) != 2 or not parts[0].isdigit() or not parts[1].isdigit():
+                raise ValueError(f"malformed range '{tok}'")
+            start, end = int(parts[0]), int(parts[1])
+            if end < start:
+                raise ValueError(
+                    f"range '{tok}' must be ascending (start ≤ end)"
+                )
+            for idx in range(start, end + 1):
+                _accept(idx)
+        else:
+            if not tok.isdigit():
+                raise ValueError(f"'{tok}' is not a number")
+            _accept(int(tok))
+
+    return result
 
 
 def _configure_logging(level: str, log_path: Path) -> None:
@@ -450,11 +534,30 @@ def _configure_logging(level: str, log_path: Path) -> None:
 
 
 def main(argv: list[str] | None = None) -> int:
-    """Script entrypoint."""
+    """Script entrypoint.
+
+    Returns:
+        0 on success, 1 on unhandled exception, 130 on Ctrl-C.
+        130 = 128 + SIGINT(2), the conventional shell exit code for
+        interactive cancellation.
+    """
     load_dotenv()
     args = parse_args(argv)
     try:
         run(args)
+    except KeyboardInterrupt:
+        # The in-flight step's context manager has already printed the
+        # "cancelled by user" marker. Print a summary footer and bail out.
+        logger.info("Pipeline cancelled by user")
+        print(file=sys.stderr)
+        print(
+            "\033[1;33m"  # bold yellow
+            "Run cancelled by user — partial output may remain under data/output/"
+            "\033[0m",
+            file=sys.stderr,
+            flush=True,
+        )
+        return 130
     except Exception:
         logger.exception("Pipeline failed")
         return 1

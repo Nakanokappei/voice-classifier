@@ -35,9 +35,6 @@ BOM_SIGNATURES: tuple[tuple[bytes, str], ...] = (
 # Candidate encodings to try when there is no BOM. Order matters.
 ENCODING_CANDIDATES: tuple[str, ...] = ("utf-8", "cp932", "euc-jp", "iso-2022-jp")
 
-# Minimum average character length for a column to look like "a text column".
-AUTO_DETECT_MIN_AVG_LENGTH: float = 10.0
-
 
 def load_csv(
     path: Path | str,
@@ -165,7 +162,17 @@ class ColumnCandidate:
 
 
 def suggest_text_columns(path: Path | str, top_k: int = 5) -> list[ColumnCandidate]:
-    """Score every column and return the most text-like ones in descending order."""
+    """Score every non-numeric column and return the best candidates in order.
+
+    Filter rule:
+        Columns whose every non-empty value is numeric are excluded (they
+        embed poorly and users never want them). Everything else — short
+        codes, dates, ids that contain letters, etc. — is eligible and
+        ranked by the heuristic score (length × non-empty × uniqueness).
+
+    If you need to embed a genuinely numeric column (a rare case), bypass
+    the suggestion flow by passing ``--text-col NAME`` directly.
+    """
     path = Path(path)
     if not path.exists():
         raise FileNotFoundError(f"Input CSV not found: {path}")
@@ -184,10 +191,11 @@ def suggest_text_columns(path: Path | str, top_k: int = 5) -> list[ColumnCandida
         if non_empty.empty:
             continue
 
-        avg_length = float(non_empty.str.len().mean())
-        if avg_length < AUTO_DETECT_MIN_AVG_LENGTH:
+        # Skip purely numeric columns — not text-like.
+        if _is_numeric_column(non_empty):
             continue
 
+        avg_length = float(non_empty.str.len().mean())
         non_empty_ratio = float(len(non_empty) / len(df))
         unique_ratio = float(non_empty.nunique() / len(non_empty))
         samples = non_empty.head(3).tolist()
@@ -204,6 +212,20 @@ def suggest_text_columns(path: Path | str, top_k: int = 5) -> list[ColumnCandida
 
     candidates.sort(key=lambda c: c.score, reverse=True)
     return candidates[:top_k]
+
+
+def _is_numeric_column(non_empty_values: pd.Series) -> bool:
+    """Return True if every non-empty value parses as a number.
+
+    We're deliberately strict: a column with a mix of numbers and strings
+    (e.g. some rows say "N/A") is *not* considered numeric, because the
+    user probably wants to embed the non-numeric signal.
+    """
+    try:
+        pd.to_numeric(non_empty_values, errors="raise")
+        return True
+    except (ValueError, TypeError):
+        return False
 
 
 # ---------------------------------------------------------------------------

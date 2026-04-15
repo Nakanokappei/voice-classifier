@@ -23,7 +23,6 @@ import numpy as np
 from sklearn.cluster import MiniBatchKMeans
 from sklearn.decomposition import PCA
 from sklearn.metrics import silhouette_score
-from tqdm import tqdm
 
 from . import utils
 
@@ -282,16 +281,18 @@ def _run_sweep(
     candidates: list[Any],
     build_model: Callable[[Any], Any],
     params_of: Callable[[Any], dict[str, Any]],
-    desc: str,
-    unit: str,
 ) -> list[dict[str, Any]]:
     """Generic sweep loop shared by all three algorithms.
 
     For each candidate, instantiate the model, fit+predict on the sample,
     and record a uniformly-shaped trial dict.
+
+    Note: no per-candidate progress bar is rendered here. The whole sweep
+    completes in a few seconds on typical input sizes, and the pipeline
+    shows a spinner on the parent "[3/N]" line for visual feedback.
     """
     trials: list[dict[str, Any]] = []
-    for candidate in tqdm(candidates, desc=desc, unit=unit, leave=False):
+    for candidate in candidates:
         model = build_model(candidate)
         labels = model.fit_predict(sample)
         trials.append(_build_trial(algorithm, params_of(candidate), labels, sample))
@@ -340,8 +341,6 @@ def _sweep_kmeans(
         candidates=candidates,
         build_model=_build,
         params_of=lambda k: {"k": k},
-        desc="KMeans sweep",
-        unit="K",
     )
 
 
@@ -358,9 +357,7 @@ def _sweep_leiden(sample: np.ndarray) -> list[dict[str, Any]]:
     graph = _build_knn_graph(sample, n_neighbors=n_neighbors)
 
     trials: list[dict[str, Any]] = []
-    for resolution in tqdm(
-        LEIDEN_RESOLUTION_GRID, desc="Leiden sweep", unit="res", leave=False
-    ):
+    for resolution in LEIDEN_RESOLUTION_GRID:
         labels = _leiden_partition(graph, resolution=float(resolution))
         trials.append(
             _build_trial(
@@ -397,8 +394,6 @@ def _sweep_hdbscan(sample: np.ndarray) -> list[dict[str, Any]]:
             "min_cluster_size": mcs,
             "min_samples": HDBSCAN_MIN_SAMPLES,
         },
-        desc="HDBSCAN sweep",
-        unit="mcs",
     )
 
 

@@ -134,20 +134,60 @@ def test_suggest_text_columns_prefers_long_unique_text(tmp_path: Path) -> None:
         assert names.index("対応内容") < names.index("カテゴリ")
 
 
-def test_suggest_text_columns_excludes_short_fields(tmp_path: Path) -> None:
-    """Columns averaging under 10 chars are excluded."""
+def test_suggest_text_columns_includes_short_non_numeric(tmp_path: Path) -> None:
+    """Short non-numeric columns (status codes, dates) are still eligible."""
     csv_path = tmp_path / "input.csv"
     _write_csv(
         csv_path,
-        "code,詳細な説明テキスト\n"
-        "A1,これは十分な長さの説明文が入っている列でテキスト分析に適しています\n"
-        "B2,別の十分に長い説明がここに入ります. クラスタリング対象として有望です\n",
+        "status,note\n"
+        "open,long note describing the ticket issue in detail\n"
+        "closed,another sufficiently long note to outrank status\n"
+        "open,yet another descriptive note for ranking purposes\n",
     )
 
     candidates = loader.suggest_text_columns(csv_path)
     names = [c.name for c in candidates]
-    assert "code" not in names
-    assert "詳細な説明テキスト" in names
+    # Both columns are non-numeric, so both should be eligible.
+    assert "status" in names
+    assert "note" in names
+    # The longer column still wins on score.
+    assert names.index("note") < names.index("status")
+
+
+def test_suggest_text_columns_excludes_purely_numeric(tmp_path: Path) -> None:
+    """Columns whose values are all numeric are excluded from suggestions."""
+    csv_path = tmp_path / "input.csv"
+    _write_csv(
+        csv_path,
+        "id,amount,description\n"
+        "1,100.50,A descriptive ticket body of reasonable length\n"
+        "2,200,Another well-written message that is long enough\n"
+        "3,300.25,Yet another text for the candidate list ranking\n",
+    )
+
+    candidates = loader.suggest_text_columns(csv_path)
+    names = [c.name for c in candidates]
+    assert "id" not in names
+    assert "amount" not in names
+    assert "description" in names
+
+
+def test_mixed_numeric_column_treated_as_text(tmp_path: Path) -> None:
+    """A column with any non-numeric value is treated as text-eligible."""
+    csv_path = tmp_path / "input.csv"
+    _write_csv(
+        csv_path,
+        "value\n"
+        "100\n"
+        "200\n"
+        "N/A\n"
+        "300\n",
+    )
+
+    candidates = loader.suggest_text_columns(csv_path)
+    names = [c.name for c in candidates]
+    # Presence of "N/A" makes the column non-numeric and therefore eligible.
+    assert "value" in names
 
 
 def test_suggest_text_columns_empty_csv_returns_empty(tmp_path: Path) -> None:
