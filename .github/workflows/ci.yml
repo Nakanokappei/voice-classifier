@@ -29,18 +29,22 @@ jobs:
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install -r requirements.txt
+          # hnswlib ships an AVX-enabled prebuilt wheel that triggers
+          # "Illegal instruction" on GitHub Actions' CPU on import. Build it
+          # from source so it matches the runner's instruction set.
+          pip install -r requirements.txt --no-binary hnswlib
 
       - name: Lint with ruff
         run: |
           pip install ruff
-          # 既存コードへの影響を最小化しつつ基本的な品質確認のみ
+          # Keep the rule set narrow so legacy code is not disturbed; we only
+          # care about undefined-name / syntax-level issues in CI.
           ruff check --select E9,F63,F7,F82 src tests
 
       - name: Run pytest
         run: |
           pytest -v --tb=short
         env:
-          # ネットワーク呼び出し系のテストは OPENAI_API_KEY なしで動く前提
-          # 万一API呼び出しに達した場合に即失敗させるためダミー値
+          # Tests mock out the OpenAI client, so no real key is ever used.
+          # Provide a dummy value so any accidental live call fails fast.
           OPENAI_API_KEY: "dummy-not-used-in-tests"
