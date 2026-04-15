@@ -239,16 +239,18 @@ def run(args: argparse.Namespace) -> Path:
             output_format=args.output_format,
         )
         # 出力ファイル名を format から決定して表示
+        # parameter_search は HTML 固定（チャート埋め込みのため）
         input_stem = Path(str(args.input)).stem
         classified_name = f"{input_stem}_classified.csv"
         if args.output_format == "html":
-            reports = "report.html / parameter_search.html"
+            report_files = "report.html"
         elif args.output_format == "both":
-            reports = "report.md+html / parameter_search.md+html"
+            report_files = "report.md+html"
         else:
-            reports = "report.md / parameter_search.md"
+            report_files = "report.md"
         step.set_summary(
-            f"→ {reports} / clusters.csv / {classified_name} / params.json"
+            f"→ {report_files} / parameter_search.html / "
+            f"clusters.csv / {classified_name} / params.json"
         )
 
     reporter_ui.footer(str(run_dir))
@@ -363,9 +365,16 @@ def _resolve_text_col_interactively(input_path: Path) -> str:
 
 
 def _configure_logging(level: str, log_path: Path) -> None:
-    """stderr と run.log の両方にログを出す."""
+    """stderr と run.log の両方にログを出す.
+
+    - stderr: ユーザ指定の `--log-level` に従う（既定 INFO）
+    - run.log: 常に **INFO 以上** を記録（`--log-level ERROR` 指定時でも
+      キャッシュヒットやフェーズ完了は残して、後追い調査できるようにする）
+    """
     root = logging.getLogger()
-    root.setLevel(level)
+    # ハンドラが受け取る最小レベル. INFO 未満を画面に出すことは想定しない
+    # （DEBUG は CLI の --log-level=DEBUG 指定時のみ有効化）
+    root.setLevel("DEBUG" if level == "DEBUG" else "INFO")
 
     # ハンドラが既に設定されているなら一旦リセット（再実行時の重複防止）
     for handler in list(root.handlers):
@@ -376,12 +385,16 @@ def _configure_logging(level: str, log_path: Path) -> None:
         datefmt="%H:%M:%S",
     )
 
+    # stderr はユーザ指定レベル（静かに動かしたい場合は ERROR で抑制可能）
     stream_handler = logging.StreamHandler(sys.stderr)
     stream_handler.setFormatter(formatter)
+    stream_handler.setLevel(level)
     root.addHandler(stream_handler)
 
+    # run.log は常時 INFO 以上を記録（キャッシュヒット等の運用情報を保全）
     file_handler = logging.FileHandler(log_path, encoding="utf-8")
     file_handler.setFormatter(formatter)
+    file_handler.setLevel("DEBUG" if level == "DEBUG" else "INFO")
     root.addHandler(file_handler)
 
 

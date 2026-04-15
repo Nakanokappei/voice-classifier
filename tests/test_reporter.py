@@ -61,15 +61,18 @@ def test_write_report_produces_expected_files(tmp_path: Path) -> None:
         text_col="対応内容",
     )
 
+    # parameter_search.md は廃止. parameter_search.html は format によらず常時生成.
     expected = [
         "report.md",
-        "parameter_search.md",
+        "parameter_search.html",
         "clusters.csv",
         "input_classified.csv",  # `input.csv` の stem が input
         "params.json",
     ]
     for name in expected:
         assert (tmp_path / name).exists(), f"{name} が生成されていない"
+    # parameter_search.md は生成されない
+    assert not (tmp_path / "parameter_search.md").exists()
 
 
 def test_clusters_csv_is_cluster_list(tmp_path: Path) -> None:
@@ -198,16 +201,21 @@ def test_parameter_search_separates_accepted_and_rejected(tmp_path: Path) -> Non
         best=best, input_path="/tmp/in.csv", text_col="text",
     )
 
-    search_text = (tmp_path / "parameter_search.md").read_text(encoding="utf-8")
-    # 3つのセクションが存在
+    # parameter_search は HTML 一本化されたので、HTML 内の Markdown 変換結果を検査
+    search_text = (tmp_path / "parameter_search.html").read_text(encoding="utf-8")
+    # 3つのセクションが存在（h2 として変換される）
     assert "採用候補ランキング" in search_text
     assert "除外: ノイズ率フィルタ" in search_text
     assert "除外: クラスタ構造が成立せず" in search_text
     # 採用候補は ✓ マーク
     assert "✓ 採用" in search_text
     # 各候補が該当セクションに入っている
-    assert "eps=0.350" in search_text and "97" in search_text  # noise ratio displayed
+    assert "eps=0.350" in search_text and "97" in search_text
     assert "eps=0.250" in search_text
+    # SVG チャートが先頭に埋め込まれている
+    assert "<svg" in search_text
+    assert "シルエットスコア" in search_text
+    assert "クラスタ数" in search_text
 
 
 def test_html_format_produces_html_files(tmp_path: Path) -> None:
@@ -241,8 +249,8 @@ def test_html_format_produces_html_files(tmp_path: Path) -> None:
     assert ":root" in html
 
 
-def test_both_format_produces_md_and_html(tmp_path: Path) -> None:
-    """output_format='both' は Markdown + HTML 両方を出す."""
+def test_both_format_produces_md_and_html_for_report(tmp_path: Path) -> None:
+    """output_format='both' は report を md+html、parameter_search は html のみ."""
     df, summaries = _make_df_and_summaries()
     best = _make_best(trials=[
         {"algorithm": "kmeans", "params": {"k": 3}, "silhouette": 0.35,
@@ -256,9 +264,12 @@ def test_both_format_produces_md_and_html(tmp_path: Path) -> None:
         output_format="both",
     )
 
-    for name in ("report.md", "report.html",
-                 "parameter_search.md", "parameter_search.html"):
+    # report は両形式
+    for name in ("report.md", "report.html"):
         assert (tmp_path / name).exists(), f"{name} が生成されていない"
+    # parameter_search は HTML のみ
+    assert (tmp_path / "parameter_search.html").exists()
+    assert not (tmp_path / "parameter_search.md").exists()
 
 
 def test_params_json_includes_search_metadata(tmp_path: Path) -> None:
