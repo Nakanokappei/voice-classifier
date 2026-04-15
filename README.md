@@ -50,21 +50,44 @@ python src/pipeline.py \
 |---|---|---|
 | `--input` | 必須 | 入力CSVパス |
 | `--text-col` | 省略可 | 分類対象テキストの列名. 省略時は候補を対話的に提示 |
+| `--text-cols` | 省略可 | カンマ区切り複数列. 各列を `label: value` 形式で結合して埋め込み |
+| `--column-labels` | 省略可 | `列名=ラベル` の組をカンマ区切り. 複数列モードでのプレフィックス変更 |
 | `--output-dir` | `data/output` | 出力ディレクトリルート |
 | `--cache-dir` | `cache` | 埋め込みキャッシュ保存先 |
 | `--model` | `text-embedding-3-small` | 埋め込みモデル |
 | `--top-k` | `5` | クラスタ代表テキストの抽出件数 |
 | `--min-clusters` | `2` | 探索するクラスタ数下限 |
 | `--max-clusters` | `20` | 探索するクラスタ数上限 |
+| `--name-clusters` | OFF | LLM でクラスタに短いラベルを自動生成（Chat API 追加呼び出し） |
+| `--name-model` | `gpt-4o-mini` | クラスタ名生成に使う Chat モデル |
+| `--format` | `md` | レポート形式. `md` / `html` / `both` |
+
+### 使用例
+
+```bash
+# 単一列
+python src/pipeline.py --input tickets.csv --text-col "対応内容"
+
+# 複数列結合（CKPS 互換）
+python src/pipeline.py --input tickets.csv \
+    --text-cols "Ticket Subject,Ticket Description" \
+    --column-labels "Ticket Subject=subject,Ticket Description=body"
+
+# LLM 自動ネーミング + HTML レポート
+python src/pipeline.py --input tickets.csv --text-col "対応内容" \
+    --name-clusters --format both
+```
 
 ## 出力
 
 `data/output/YYYYMMDD_HHMMSS/` 配下に以下を生成:
 
-- `report.md`             — クラスタリング結果（採用設定・クラスタ別代表テキスト）
-- `parameter_search.md`   — パラメータ探索の全貌（採用/除外理由・全試行ランキング）
-- `clusters.csv`          — 入力CSV + `cluster_id` 付与
-- `params.json`           — 採用アルゴリズム・パラメータ・スコア・探索メタ情報
+- `report.md` / `report.html`               — クラスタリング結果（採用設定・クラスタ別代表テキスト）
+- `parameter_search.md` / `.html`           — パラメータ探索の全貌（採用/除外理由・全試行ランキング）
+- `clusters.csv`                             — 入力CSV + `cluster_id`（`--name-clusters` 時は `cluster_name` も）
+- `params.json`                              — 採用アルゴリズム・パラメータ・スコア・探索メタ情報
+
+`--format md`（既定）では Markdown のみ、`--format html` では HTML のみ、`--format both` で両方.
 
 ## ドキュメント
 

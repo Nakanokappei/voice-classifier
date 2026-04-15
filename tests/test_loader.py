@@ -156,3 +156,171 @@ def test_suggest_text_columns_empty_csv_returns_empty(tmp_path: Path) -> None:
     _write_csv(csv_path, "a,b\n,\n,\n")
     candidates = loader.suggest_text_columns(csv_path)
     assert candidates == []
+
+
+# ---------------------------------------------------------------------------
+# 整合性バリデーション
+# ---------------------------------------------------------------------------
+
+
+def test_empty_file_raises_value_error(tmp_path: Path) -> None:
+    """サイズ 0 ファイルは ValueError（早期検出）."""
+    csv_path = tmp_path / "empty.csv"
+    csv_path.write_bytes(b"")
+    with pytest.raises(ValueError, match="空ファイル"):
+        loader.load_csv(csv_path, text_col="whatever")
+
+
+def test_duplicate_column_names_raises(tmp_path: Path) -> None:
+    """列名が重複する CSV はエラー."""
+    csv_path = tmp_path / "dup.csv"
+    _write_csv(
+        csv_path,
+        "対応内容,対応内容\n"
+        "text1,text2\n",
+    )
+    with pytest.raises(ValueError, match="列名が重複"):
+        loader.load_csv(csv_path, text_col="対応内容")
+
+
+def test_malformed_csv_raises_value_error(tmp_path: Path) -> None:
+    """列数が行ごとに違う CSV はエラー（行番号付きで報告されること）."""
+    csv_path = tmp_path / "bad.csv"
+    # クォート閉じ忘れで 2 行目以降の列数がズレる
+    csv_path.write_text(
+        'a,b,c\n"unclosed quote,x,y\nnext_row,p,q\n',
+        encoding="utf-8",
+    )
+    with pytest.raises(ValueError, match="列数が異なる行"):
+        loader.load_csv(csv_path, text_col="a")
+
+
+def test_validation_catches_header_only(tmp_path: Path) -> None:
+    """ヘッダのみでデータ行なしの CSV はエラー."""
+    csv_path = tmp_path / "header_only.csv"
+    _write_csv(csv_path, "対応内容\n")
+    with pytest.raises(ValueError):
+        loader.load_csv(csv_path, text_col="対応内容")
+
+
+# ---------------------------------------------------------------------------
+# BOM / 改行コード / RFC 4180
+# ---------------------------------------------------------------------------
+
+
+def test_utf8_bom_is_stripped(tmp_path: Path) -> None:
+    """UTF-8 BOM 付き CSV を正しく読み、ヘッダに BOM 文字が残らないこと."""
+    csv_path = tmp_path / "bom.csv"
+    csv_path.write_bytes(
+        b"\xef\xbb\xbf\xe5\xaf\xbe\xe5\xbf\x9c\xe5\x86\x85\xe5\xae\xb9\n"
+        b"\xe3\x83\x86\xe3\x82\xb9\xe3\x83\x88\n"
+    )  # BOM + "対応内容\nテスト\n"
+
+    df = loader.load_csv(csv_path, text_col="対応内容")
+    assert len(df) == 1
+    assert df["_normalized_text"].iloc[0] == "テスト"
+    # ヘッダに BOM が紛れ込んでいないこと
+    assert "\ufeff" not in "".join(df.columns.astype(str))
+
+
+def test_crlf_mixed_line_endings(tmp_path: Path) -> None:
+    """CRLF / LF 混在の改行コードを扱えること."""
+    csv_path = tmp_path / "mixed.csv"
+    # 行1: CRLF, 行2: LF
+    content = "col\r\n" + "first value\r\n" + "second value\n"
+    csv_path.write_text(content, encoding="utf-8")
+
+    df = loader.load_csv(csv_path, text_col="col")
+    assert len(df) == 2
+    assert df["_normalized_text"].tolist() == ["first value", "second value"]
+
+
+def test_quoted_multiline_cell_is_preserved_as_single_row(tmp_path: Path) -> None:
+    """RFC 4180: ダブルクオート内の改行は 1 セル内に保持される."""
+    csv_path = tmp_path / "multiline.csv"
+    content = 'col,other\n"line1\nline2\nline3",extra\nshort,plain\n'
+    csv_path.write_text(content, encoding="utf-8")
+
+    df = loader.load_csv(csv_path, text_col="col")
+    # 2 行に収まる（複数行セルは 1 行としてカウント）
+    assert len(df) == 2
+    # 複数行の内容が空白圧縮で 1 行に正規化される
+    assert df["_normalized_text"].iloc[0] == "line1 line2 line3"
+
+
+def test_shift_jis_encoding(tmp_path: Path) -> None:
+    """Shift_JIS (CP932) エンコーディングの CSV も読めること."""
+    csv_path = tmp_path / "sjis.csv"
+    content = "対応内容\n返品希望\nサイズ違い\n"
+    csv_path.write_bytes(content.encode("cp932"))
+
+    df = loader.load_csv(csv_path, text_col="対応内容")
+    assert len(df) == 2
+    assert "返品希望" in df["_normalized_text"].tolist()
+
+
+# ---------------------------------------------------------------------------
+# 複数列モード
+# ---------------------------------------------------------------------------
+
+
+def test_multi_column_combines_with_labels(tmp_path: Path) -> None:
+    """複数列を指定すると label: value 形式で結合されること."""
+    csv_path = tmp_path / "multi.csv"
+    _write_csv(
+        csv_path,
+        "件名,本文\n"
+        "返品の件,色が違いました\n"
+        "配送遅延,まだ届きません\n",
+    )
+
+    df = loader.load_csv(
+        csv_path,
+        text_cols=["件名", "本文"],
+        column_labels={"件名": "subject", "本文": "body"},
+    )
+
+    assert len(df) == 2
+    texts = df["_normalized_text"].tolist()
+    # 結合テキストが各ラベル付きで含まれる
+    assert "subject: 返品の件" in texts[0]
+    assert "body: 色が違いました" in texts[0]
+
+
+def test_multi_column_defaults_label_to_column_name(tmp_path: Path) -> None:
+    """column_labels 未指定時は列名自体がラベルになる."""
+    csv_path = tmp_path / "multi2.csv"
+    _write_csv(csv_path, "A,B\nalpha,beta\n")
+
+    df = loader.load_csv(csv_path, text_cols=["A", "B"])
+    assert "A: alpha" in df["_normalized_text"].iloc[0]
+    assert "B: beta" in df["_normalized_text"].iloc[0]
+
+
+def test_multi_column_skips_empty_cells(tmp_path: Path) -> None:
+    """複数列モードで一部セルが空の場合、そのセルはスキップ."""
+    csv_path = tmp_path / "partial.csv"
+    _write_csv(csv_path, "subj,body\n件名のみ,\n,本文のみ\n")
+
+    df = loader.load_csv(csv_path, text_cols=["subj", "body"])
+    assert len(df) == 2
+    assert df["_normalized_text"].iloc[0] == "subj: 件名のみ"
+    assert df["_normalized_text"].iloc[1] == "body: 本文のみ"
+
+
+def test_text_col_and_text_cols_are_exclusive(tmp_path: Path) -> None:
+    """text_col と text_cols を同時指定するとエラー."""
+    csv_path = tmp_path / "x.csv"
+    _write_csv(csv_path, "a,b\n1,2\n")
+
+    with pytest.raises(ValueError, match="同時に指定"):
+        loader.load_csv(csv_path, text_col="a", text_cols=["a", "b"])
+
+
+def test_neither_text_col_nor_text_cols_raises(tmp_path: Path) -> None:
+    """どちらも未指定の場合はエラー."""
+    csv_path = tmp_path / "x.csv"
+    _write_csv(csv_path, "a\n1\n")
+
+    with pytest.raises(ValueError, match="いずれか"):
+        loader.load_csv(csv_path)

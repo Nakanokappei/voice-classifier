@@ -12,7 +12,7 @@ from __future__ import annotations
 import json
 import logging
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 import numpy as np
 import pandas as pd
@@ -28,6 +28,45 @@ QUALITY_LABEL: dict[str, str] = {
     "poor": "要再検討",
 }
 
+OutputFormat = Literal["md", "html", "both"]
+
+# HTML レポート用の埋め込み CSS. テーブル可読性と PII 配慮の配色
+_HTML_CSS = """
+:root {
+  --fg: #1f2328;
+  --muted: #57606a;
+  --accent: #0969da;
+  --warn: #bf8700;
+  --bad: #cf222e;
+  --bg: #ffffff;
+  --bg-alt: #f6f8fa;
+  --border: #d0d7de;
+}
+body {
+  font-family: -apple-system, BlinkMacSystemFont, "Hiragino Sans",
+               "Noto Sans CJK JP", "Segoe UI", sans-serif;
+  color: var(--fg); background: var(--bg);
+  max-width: 960px; margin: 2rem auto; padding: 0 1.25rem;
+  line-height: 1.6;
+}
+h1, h2, h3 { border-bottom: 1px solid var(--border); padding-bottom: .3em; }
+h1 { font-size: 1.7rem; }
+h2 { font-size: 1.35rem; margin-top: 2rem; }
+h3 { font-size: 1.1rem; border-bottom: none; color: var(--accent); }
+table { border-collapse: collapse; width: 100%; margin: .8rem 0; font-size: .92rem; }
+th, td { border: 1px solid var(--border); padding: .45rem .7rem; text-align: left; }
+th { background: var(--bg-alt); }
+tr:nth-child(even) td { background: var(--bg-alt); }
+code { background: var(--bg-alt); padding: .1em .35em; border-radius: 3px;
+       font-size: .9em; }
+blockquote { border-left: 4px solid var(--warn); background: #fff8c5;
+             padding: .6rem 1rem; margin: 1rem 0; border-radius: 3px; }
+ol li, ul li { margin: .2rem 0; }
+hr { border: none; border-top: 1px solid var(--border); margin: 1.5rem 0; }
+.footer { color: var(--muted); font-size: .85rem; margin-top: 3rem;
+          text-align: right; }
+""".strip()
+
 
 def write_report(
     output_dir: Path | str,
@@ -37,8 +76,10 @@ def write_report(
     best: BestConfig,
     input_path: Path | str,
     text_col: str,
+    cluster_names: dict[int, str] | None = None,
+    output_format: OutputFormat = "md",
 ) -> None:
-    """4種類の成果物を `output_dir` に書き出す.
+    """成果物を `output_dir` に書き出す.
 
     Args:
         output_dir: 出力先（存在しなければ作成）
@@ -48,28 +89,43 @@ def write_report(
         best: `tuner.find_best_clustering` の戻り値
         input_path: 入力CSVパス（レポート記載用）
         text_col: 対象テキスト列名（レポート記載用）
+        cluster_names: LLM 等で生成したクラスタID→ラベルのマップ（任意）
+        output_format: "md" / "html" / "both" — レポート形式
     """
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
+    names = cluster_names or {}
 
-    _write_clusters_csv(output_dir / "clusters.csv", df, labels)
-    _write_params_json(output_dir / "params.json", best, input_path, text_col)
-    _write_clustering_report(
-        output_dir / "report.md",
-        df=df,
-        summaries=summaries,
-        best=best,
-        input_path=input_path,
-        text_col=text_col,
+    # 常に出力（機械可読）
+    _write_clusters_csv(output_dir / "clusters.csv", df, labels, names)
+    _write_params_json(output_dir / "params.json", best, input_path, text_col, names)
+
+    # Markdown 文字列を生成（両形式で共通利用）
+    clustering_md = _build_clustering_report_md(
+        df=df, summaries=summaries, best=best,
+        input_path=input_path, text_col=text_col, cluster_names=names,
     )
-    _write_parameter_search_report(
-        output_dir / "parameter_search.md",
-        best=best,
-        input_path=input_path,
-        text_col=text_col,
+    parameter_search_md = _build_parameter_search_md(
+        best=best, input_path=input_path, text_col=text_col,
     )
 
-    logger.info("レポート出力完了: %s", output_dir)
+    want_md = output_format in ("md", "both")
+    want_html = output_format in ("html", "both")
+
+    if want_md:
+        (output_dir / "report.md").write_text(clustering_md, encoding="utf-8")
+        (output_dir / "parameter_search.md").write_text(
+            parameter_search_md, encoding="utf-8"
+        )
+    if want_html:
+        _write_html(output_dir / "report.html", clustering_md, "クラスタリング結果レポート")
+        _write_html(
+            output_dir / "parameter_search.html",
+            parameter_search_md,
+            "パラメータ探索レポート",
+        )
+
+    logger.info("レポート出力完了: %s (format=%s)", output_dir, output_format)
 
 
 # ---------------------------------------------------------------------------
@@ -77,10 +133,17 @@ def write_report(
 # ---------------------------------------------------------------------------
 
 
-def _write_clusters_csv(path: Path, df: pd.DataFrame, labels: np.ndarray) -> None:
-    """入力DataFrameに cluster_id を付けて保存."""
+def _write_clusters_csv(
+    path: Path,
+    df: pd.DataFrame,
+    labels: np.ndarray,
+    cluster_names: dict[int, str],
+) -> None:
+    """入力DataFrameに cluster_id / cluster_name を付けて保存."""
     out = df.copy()
     out["cluster_id"] = labels
+    if cluster_names:
+        out["cluster_name"] = [cluster_names.get(int(cid), "") for cid in labels]
     out.to_csv(path, index=False, encoding="utf-8-sig")
     logger.debug("clusters.csv 保存: %d 行", len(out))
 
@@ -90,6 +153,7 @@ def _write_params_json(
     best: BestConfig,
     input_path: Path | str,
     text_col: str,
+    cluster_names: dict[int, str],
 ) -> None:
     """採用パラメータ・スコアをJSON化."""
     payload: dict[str, Any] = {
@@ -116,6 +180,10 @@ def _write_params_json(
             for t in best.all_trials
         ],
     }
+    if cluster_names:
+        payload["cluster_names"] = {
+            str(cid): name for cid, name in cluster_names.items()
+        }
     with path.open("w", encoding="utf-8") as f:
         json.dump(payload, f, ensure_ascii=False, indent=2)
 
@@ -125,15 +193,15 @@ def _write_params_json(
 # ---------------------------------------------------------------------------
 
 
-def _write_clustering_report(
-    path: Path,
+def _build_clustering_report_md(
     df: pd.DataFrame,
     summaries: list[ClusterSummary],
     best: BestConfig,
     input_path: Path | str,
     text_col: str,
-) -> None:
-    """人間可読なクラスタリング結果レポート."""
+    cluster_names: dict[int, str],
+) -> str:
+    """クラスタリング結果レポートの Markdown 文字列を生成."""
     lines: list[str] = []
     lines.append("# クラスタリング結果レポート")
     lines.append("")
@@ -176,7 +244,13 @@ def _write_clustering_report(
     non_noise.sort(key=lambda s: s.size, reverse=True)
 
     for summary in non_noise:
-        lines.append(f"### クラスタ #{summary.cluster_id}（{summary.size}件）")
+        name = cluster_names.get(summary.cluster_id)
+        heading = (
+            f"### クラスタ #{summary.cluster_id}: {name}（{summary.size}件）"
+            if name
+            else f"### クラスタ #{summary.cluster_id}（{summary.size}件）"
+        )
+        lines.append(heading)
         lines.append("")
         if not summary.representative_texts:
             lines.append("_代表テキストなし_")
@@ -199,7 +273,7 @@ def _write_clustering_report(
         lines.append("密度の低い領域に位置し、いずれのクラスタにも属さなかったサンプルです.")
         lines.append("")
 
-    path.write_text("\n".join(lines), encoding="utf-8")
+    return "\n".join(lines)
 
 
 # ---------------------------------------------------------------------------
@@ -207,13 +281,12 @@ def _write_clustering_report(
 # ---------------------------------------------------------------------------
 
 
-def _write_parameter_search_report(
-    path: Path,
+def _build_parameter_search_md(
     best: BestConfig,
     input_path: Path | str,
     text_col: str,
-) -> None:
-    """パラメータ探索の全貌と採用根拠をまとめる."""
+) -> str:
+    """パラメータ探索レポートの Markdown 文字列を生成."""
     lines: list[str] = []
     lines.append("# パラメータ探索レポート")
     lines.append("")
@@ -346,7 +419,51 @@ def _write_parameter_search_report(
             )
         lines.append("")
 
-    path.write_text("\n".join(lines), encoding="utf-8")
+    return "\n".join(lines)
+
+
+# ---------------------------------------------------------------------------
+# HTML 生成
+# ---------------------------------------------------------------------------
+
+
+def _write_html(path: Path, md_content: str, title: str) -> None:
+    """Markdown を HTML に変換してファイル保存."""
+    import markdown as _md
+
+    body_html = _md.markdown(
+        md_content,
+        extensions=["tables", "fenced_code"],
+    )
+    html = _wrap_html(body_html, title)
+    path.write_text(html, encoding="utf-8")
+
+
+def _wrap_html(body_html: str, title: str) -> str:
+    """`<html>` シェルで包む. CSS はインラインで埋め込む（配布容易性重視）."""
+    return (
+        "<!DOCTYPE html>\n"
+        "<html lang=\"ja\">\n"
+        "<head>\n"
+        "<meta charset=\"UTF-8\">\n"
+        f"<title>{_escape_html(title)}</title>\n"
+        f"<style>{_HTML_CSS}</style>\n"
+        "</head>\n"
+        "<body>\n"
+        f"{body_html}\n"
+        "<div class=\"footer\">Generated by voice-classifier</div>\n"
+        "</body>\n"
+        "</html>\n"
+    )
+
+
+def _escape_html(text: str) -> str:
+    """最小限の HTML エスケープ（title 要素用）."""
+    return (
+        text.replace("&", "&amp;")
+        .replace("<", "&lt;")
+        .replace(">", "&gt;")
+    )
 
 
 # ---------------------------------------------------------------------------

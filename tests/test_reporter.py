@@ -121,6 +121,57 @@ def test_parameter_search_separates_accepted_and_rejected(tmp_path: Path) -> Non
     assert "eps=0.250" in search_text
 
 
+def test_html_format_produces_html_files(tmp_path: Path) -> None:
+    """output_format='html' で HTML ファイルが生成され、Markdown は生成されない."""
+    df, summaries = _make_df_and_summaries()
+    best = _make_best(trials=[
+        {"algorithm": "kmeans", "params": {"k": 3}, "silhouette": 0.35,
+         "n_clusters": 3, "n_noise": 0},
+    ])
+
+    reporter.write_report(
+        output_dir=tmp_path,
+        df=df, labels=best.labels, summaries=summaries, best=best,
+        input_path="/tmp/in.csv", text_col="text",
+        output_format="html",
+    )
+
+    assert (tmp_path / "report.html").exists()
+    assert (tmp_path / "parameter_search.html").exists()
+    # Markdown は生成しない
+    assert not (tmp_path / "report.md").exists()
+    assert not (tmp_path / "parameter_search.md").exists()
+
+    html = (tmp_path / "report.html").read_text(encoding="utf-8")
+    # 基本構造が含まれる
+    assert "<!DOCTYPE html>" in html
+    assert "<title>" in html
+    assert "<table>" in html  # 概要テーブルなど
+    # CSS がインライン埋め込み
+    assert "<style>" in html
+    assert ":root" in html
+
+
+def test_both_format_produces_md_and_html(tmp_path: Path) -> None:
+    """output_format='both' は Markdown + HTML 両方を出す."""
+    df, summaries = _make_df_and_summaries()
+    best = _make_best(trials=[
+        {"algorithm": "kmeans", "params": {"k": 3}, "silhouette": 0.35,
+         "n_clusters": 3, "n_noise": 0},
+    ])
+
+    reporter.write_report(
+        output_dir=tmp_path,
+        df=df, labels=best.labels, summaries=summaries, best=best,
+        input_path="/tmp/in.csv", text_col="text",
+        output_format="both",
+    )
+
+    for name in ("report.md", "report.html",
+                 "parameter_search.md", "parameter_search.html"):
+        assert (tmp_path / name).exists(), f"{name} が生成されていない"
+
+
 def test_params_json_includes_search_metadata(tmp_path: Path) -> None:
     """params.json に探索メタ情報（PCA・サンプル数・フィルタ閾値）が記録される."""
     df, summaries = _make_df_and_summaries()

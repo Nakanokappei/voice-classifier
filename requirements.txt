@@ -13,5 +13,8 @@ hdbscan>=0.8.33
 # UX
 tqdm>=4.66.0
 
+# Markdown → HTML 変換（--format html / both で使用）
+markdown>=3.5
+
 # Testing (dev)
 pytest>=8.0.0
