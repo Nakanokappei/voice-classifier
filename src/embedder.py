@@ -12,7 +12,9 @@ import hashlib
 import logging
 import os
 import pickle
+import threading
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
 import numpy as np
@@ -25,6 +27,7 @@ DEFAULT_MODEL: str = "text-embedding-3-small"
 BATCH_SIZE: int = 100              # OpenAI の推奨バッチ上限の範囲内
 MAX_RETRIES: int = 5
 BACKOFF_BASE_SEC: float = 2.0
+MAX_CONCURRENCY: int = 8           # 並列バッチ数（Tierに応じて増減）
 
 
 def get_embeddings(
@@ -102,16 +105,37 @@ def _make_client(api_key: str | None) -> OpenAI:
 
 
 def _fetch_batched(client: OpenAI, texts: list[str], model: str) -> list[np.ndarray]:
-    """テキストをバッチに分割して API 呼び出し."""
+    """テキストをバッチに分割して API 呼び出し（並列実行）.
+
+    バッチ順序はシーケンシャルに保ちつつ、複数バッチを ThreadPoolExecutor で
+    並行に発行する. OpenAI クライアントはスレッドセーフ.
+    """
+    # バッチを事前に切り出し（インデックス付き）
+    batches: list[tuple[int, list[str]]] = []
+    for start in range(0, len(texts), BATCH_SIZE):
+        batches.append((start, texts[start : start + BATCH_SIZE]))
+
+    # 結果は元の順序で並べ直すため、インデックス付きで格納
+    results_by_start: dict[int, list[np.ndarray]] = {}
+    results_lock = threading.Lock()
+
+    with ThreadPoolExecutor(max_workers=MAX_CONCURRENCY) as executor:
+        future_to_start = {
+            executor.submit(_request_with_retry, client, batch, model): start
+            for start, batch in batches
+        }
+        with tqdm(total=len(batches), desc="Embeddings", unit="batch") as pbar:
+            for future in as_completed(future_to_start):
+                start = future_to_start[future]
+                batch_vectors = future.result()
+                with results_lock:
+                    results_by_start[start] = batch_vectors
+                pbar.update(1)
+
+    # 開始インデックス昇順で結合
     results: list[np.ndarray] = []
-    for start in tqdm(
-        range(0, len(texts), BATCH_SIZE),
-        desc="Embeddings",
-        unit="batch",
-    ):
-        batch = texts[start : start + BATCH_SIZE]
-        batch_vectors = _request_with_retry(client, batch, model)
-        results.extend(batch_vectors)
+    for start, _ in batches:
+        results.extend(results_by_start[start])
     return results
 
 
