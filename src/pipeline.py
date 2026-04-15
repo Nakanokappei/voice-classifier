@@ -501,11 +501,15 @@ def _parse_column_selection(raw: str, max_index: int) -> list[int]:
 
 
 def _configure_logging(level: str, log_path: Path) -> None:
-    """Set up logging to both stderr and `run.log`.
+    """Set up logging to both stderr and ``run.log``.
 
-    - stderr uses the user-specified `--log-level` (so `ERROR` stays quiet).
-    - run.log always records INFO and above, even when stderr is set to ERROR,
-      so that cache hits and phase outcomes can be reviewed after the fact.
+    - stderr uses the user-specified ``--log-level`` (so ``ERROR`` stays quiet).
+    - ``run.log`` always records INFO and above, even when stderr is set to
+      ``ERROR``, so cache hits, phase outcomes, and warnings can be reviewed
+      after the fact.
+    - ``logging.captureWarnings(True)`` routes Python's ``warnings.warn(...)``
+      messages into the ``py.warnings`` logger, so third-party deprecation
+      notices and similar also land in ``run.log``.
     """
     root = logging.getLogger()
     # Minimum level processed by the handlers below.
@@ -531,6 +535,10 @@ def _configure_logging(level: str, log_path: Path) -> None:
     file_handler.setFormatter(formatter)
     file_handler.setLevel("DEBUG" if level == "DEBUG" else "INFO")
     root.addHandler(file_handler)
+
+    # Pipe `warnings.warn(...)` through the logger so run.log captures it too.
+    # Without this, deprecation and user warnings only reach stderr.
+    logging.captureWarnings(True)
 
 
 def main(argv: list[str] | None = None) -> int:

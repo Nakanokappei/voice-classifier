@@ -114,6 +114,7 @@ class ProgressReporter:
             )
 
         ctx = _StepContext(self, description=description)
+        step_id = f"{self.current_step}/{self.total_steps}"
         try:
             yield ctx
         except KeyboardInterrupt:
@@ -125,8 +126,14 @@ class ProgressReporter:
                 f"({elapsed:.1f}s) cancelled by user"
             )
             self._emit_final_line(final_line, had_spinner=spinner is not None)
+            # Mirror the visible line into run.log so after-the-fact analysis
+            # can see exactly which step was interrupted.
+            logger.warning(
+                "step %s '%s' cancelled by user after %.1fs",
+                step_id, description, elapsed,
+            )
             raise
-        except BaseException:
+        except BaseException as exc:
             elapsed = time.monotonic() - self._phase_start
             if spinner is not None:
                 spinner.stop()
@@ -135,6 +142,13 @@ class ProgressReporter:
                 f"({elapsed:.1f}s) failed"
             )
             self._emit_final_line(final_line, had_spinner=spinner is not None)
+            # `logger.exception` would also re-capture the traceback; doing it
+            # at the step boundary helps diagnose which step blew up.
+            logger.error(
+                "step %s '%s' failed after %.1fs: %s",
+                step_id, description, elapsed, exc,
+                exc_info=True,
+            )
             raise
         else:
             elapsed = time.monotonic() - self._phase_start
@@ -147,6 +161,12 @@ class ProgressReporter:
                 f"({elapsed:.1f}s){summary}"
             )
             self._emit_final_line(final_line, had_spinner=spinner is not None)
+            # Log step success too so run.log records a complete timeline.
+            logger.info(
+                "step %s '%s' done in %.1fs%s",
+                step_id, description, elapsed,
+                f" [{ctx.summary}]" if ctx.summary else "",
+            )
 
     def _emit_final_line(self, final_line: str, *, had_spinner: bool) -> None:
         """Write the completion line, overwriting the spinner line on TTYs.
