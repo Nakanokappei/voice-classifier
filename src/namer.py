@@ -45,7 +45,72 @@ from .clusterer import ClusterSummary, NOISE_LABEL
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_MODEL: str = "gpt-4o-mini"
+# OpenAI の公式推奨: GPT-5.4 nano は分類・データ抽出・ランキング・サブエージェント
+# 用途で速度とコストの両立が期待できるとされる. クラスタラベリングは正に該当.
+DEFAULT_MODEL: str = "gpt-5.4-nano"
+
+
+# ---------------------------------------------------------------------------
+# Model-specific API adapters
+# ---------------------------------------------------------------------------
+#
+# OpenAI のモデルはシリーズごとに Chat Completions API の許容パラメータが異なる:
+#   - GPT-5 系, o-series: `max_completion_tokens` を使う. `max_tokens` はエラー
+#   - o-series (o1, o3): `temperature` も未サポート（固定値）
+#   - GPT-4o, GPT-4, GPT-3.5: 従来の `max_tokens` が通る
+#
+# 新モデルが出るたびに個別対応するのは辛いので、モデル名プレフィックスで判定する.
+# 判定ロジックは `_build_chat_kwargs` に集約.
+
+
+def _uses_max_completion_tokens(model: str) -> bool:
+    """新 API 仕様（max_completion_tokens）を使うモデル判定."""
+    prefixes = ("gpt-5", "o1", "o3", "o4")
+    return any(model.startswith(p) for p in prefixes)
+
+
+def _supports_custom_temperature(model: str) -> bool:
+    """temperature パラメータを受け付けるか."""
+    # o-series は temperature 1.0 固定. 他は自由.
+    reasoning_prefixes = ("o1", "o3", "o4")
+    return not any(model.startswith(p) for p in reasoning_prefixes)
+
+
+def _supports_json_mode(model: str) -> bool:
+    """response_format={'type': 'json_object'} が使えるか.
+
+    GPT-4o, GPT-5, o-series, gpt-4-turbo は対応.
+    gpt-3.5 は古いバージョンだと非対応だが一般利用される 0125 以降は OK.
+    保守的に「大体対応している」前提で True を返し、失敗時はプロンプトだけで回避.
+    """
+    return True
+
+
+def _build_chat_kwargs(
+    model: str,
+    messages: list[dict],
+    max_tokens: int,
+    temperature: float = 0.3,
+    json_mode: bool = True,
+) -> dict:
+    """モデル別 API 仕様差を吸収して Chat Completions の kwargs を組み立てる."""
+    kwargs: dict = {"model": model, "messages": messages}
+
+    # トークン上限パラメータ
+    if _uses_max_completion_tokens(model):
+        kwargs["max_completion_tokens"] = max_tokens
+    else:
+        kwargs["max_tokens"] = max_tokens
+
+    # temperature（o-series は省略）
+    if _supports_custom_temperature(model):
+        kwargs["temperature"] = temperature
+
+    # JSON モード
+    if json_mode and _supports_json_mode(model):
+        kwargs["response_format"] = {"type": "json_object"}
+
+    return kwargs
 MAX_CONCURRENCY: int = 8
 MAX_RETRIES: int = 4
 BACKOFF_BASE_SEC: float = 2.0
@@ -152,14 +217,15 @@ def infer_dataset_context(
     for attempt in range(1, MAX_RETRIES + 1):
         try:
             response = client.chat.completions.create(
-                model=model,
-                messages=[
-                    {"role": "system", "content": system},
-                    {"role": "user", "content": user},
-                ],
-                temperature=0.2,
-                max_tokens=300,
-                response_format={"type": "json_object"},
+                **_build_chat_kwargs(
+                    model=model,
+                    messages=[
+                        {"role": "system", "content": system},
+                        {"role": "user", "content": user},
+                    ],
+                    temperature=0.2,
+                    max_tokens=300,
+                )
             )
             raw = response.choices[0].message.content or "{}"
             payload = _safe_json_loads(raw)
@@ -512,14 +578,15 @@ def _request_annotation(
     for attempt in range(1, MAX_RETRIES + 1):
         try:
             response = client.chat.completions.create(
-                model=model,
-                messages=[
-                    {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": user_prompt},
-                ],
-                temperature=0.3,
-                max_tokens=400,
-                response_format={"type": "json_object"},
+                **_build_chat_kwargs(
+                    model=model,
+                    messages=[
+                        {"role": "system", "content": system_prompt},
+                        {"role": "user", "content": user_prompt},
+                    ],
+                    temperature=0.3,
+                    max_tokens=400,
+                )
             )
             content = response.choices[0].message.content or "{}"
             return _parse_annotation_json(content)
@@ -624,14 +691,15 @@ def _request_differentiated_label(
     for attempt in range(1, MAX_RETRIES + 1):
         try:
             response = client.chat.completions.create(
-                model=model,
-                messages=[
-                    {"role": "system", "content": system},
-                    {"role": "user", "content": user},
-                ],
-                temperature=0.35,
-                max_tokens=400,
-                response_format={"type": "json_object"},
+                **_build_chat_kwargs(
+                    model=model,
+                    messages=[
+                        {"role": "system", "content": system},
+                        {"role": "user", "content": user},
+                    ],
+                    temperature=0.35,
+                    max_tokens=400,
+                )
             )
             content = response.choices[0].message.content or "{}"
             parsed = _parse_annotation_json(content)

@@ -91,8 +91,15 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     )
     parser.add_argument(
         "--model",
+        "--embedding-model",
+        dest="model",
         default=embedder.DEFAULT_MODEL,
-        help="OpenAI 埋め込みモデル名",
+        help=(
+            f"OpenAI 埋め込みモデル名. 既定: {embedder.DEFAULT_MODEL}. "
+            "選択肢例: text-embedding-3-small (既定), text-embedding-3-large, "
+            "text-embedding-ada-002. 次元数とコストが異なるためキャッシュは"
+            "モデル別に保存される"
+        ),
     )
     parser.add_argument("--top-k", type=int, default=5, help="代表テキスト抽出件数")
     parser.add_argument("--min-clusters", type=int, default=2, help="KMeans 下限K")
@@ -107,8 +114,14 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     )
     parser.add_argument(
         "--name-model",
+        "--llm-model",
+        dest="name_model",
         default=namer.DEFAULT_MODEL,
-        help="クラスタ名生成に使う OpenAI Chat モデル",
+        help=(
+            f"クラスタ名生成に使う OpenAI Chat モデル. 既定: {namer.DEFAULT_MODEL}. "
+            "GPT-5 系 / o-series / GPT-4o / GPT-3.5 系で API 仕様差があるが、"
+            "namer._build_chat_kwargs が自動吸収する"
+        ),
     )
     parser.add_argument(
         "--format",

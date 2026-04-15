@@ -54,12 +54,12 @@ python src/pipeline.py \
 | `--column-labels` | 省略可 | `列名=ラベル` の組をカンマ区切り. 複数列モードでのプレフィックス変更 |
 | `--output-dir` | `data/output` | 出力ディレクトリルート |
 | `--cache-dir` | `cache` | 埋め込みキャッシュ保存先 |
-| `--model` | `text-embedding-3-small` | 埋め込みモデル |
+| `--model` / `--embedding-model` | `text-embedding-3-small` | 埋め込みモデル. `text-embedding-3-large` 等に切替可. キャッシュはモデル別 |
 | `--top-k` | `5` | クラスタ代表テキストの抽出件数 |
 | `--min-clusters` | `2` | 探索するクラスタ数下限 |
 | `--max-clusters` | `20` | 探索するクラスタ数上限 |
 | `--name-clusters` | OFF | LLM で各クラスタに **短いラベル + 要約テキスト** を自動生成（Chat API 追加呼び出し）. 指定時は以下のフローが動く: (1) データセット全体の意味を5件サンプルから推定 → (2) グラウンディング付きプロンプトで並列ラベル生成 → (3) ラベル重複を検出したらサイズが小さい側を両方の実データで差別化再生成（最大3周）. report.md の代表テキストは要約に置き換わり、重心付近の 5 件は検証用 `<details>` に格下げ |
-| `--name-model` | `gpt-4o-mini` | クラスタ名生成に使う Chat モデル |
+| `--name-model` / `--llm-model` | `gpt-5.4-nano` | クラスタ名生成に使う Chat モデル. GPT-5 系 / o-series / GPT-4o / GPT-3.5 系の API 仕様差（`max_completion_tokens` vs `max_tokens`、temperature 制約等）は自動吸収 |
 | `--format` | `md` | レポート形式. `md` / `html` / `both` |
 
 ### 使用例

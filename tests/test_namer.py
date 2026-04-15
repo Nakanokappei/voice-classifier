@@ -323,6 +323,62 @@ def test_resolve_duplicates_keeps_larger_relabels_smaller() -> None:
     assert client.call_count == 1
 
 
+# ---------------------------------------------------------------------------
+# モデル別 API アダプタ
+# ---------------------------------------------------------------------------
+
+
+def test_build_chat_kwargs_uses_max_completion_tokens_for_gpt5() -> None:
+    """GPT-5 系は max_completion_tokens を使う."""
+    kwargs = namer._build_chat_kwargs(
+        model="gpt-5.4-nano",
+        messages=[{"role": "user", "content": "x"}],
+        max_tokens=200,
+        temperature=0.3,
+    )
+    assert "max_completion_tokens" in kwargs
+    assert "max_tokens" not in kwargs
+    assert kwargs["max_completion_tokens"] == 200
+    assert kwargs["temperature"] == 0.3
+
+
+def test_build_chat_kwargs_uses_max_tokens_for_gpt4() -> None:
+    """GPT-4o / gpt-3.5 などは従来の max_tokens."""
+    kwargs = namer._build_chat_kwargs(
+        model="gpt-4o-mini",
+        messages=[{"role": "user", "content": "x"}],
+        max_tokens=200,
+        temperature=0.3,
+    )
+    assert "max_tokens" in kwargs
+    assert "max_completion_tokens" not in kwargs
+
+
+def test_build_chat_kwargs_omits_temperature_for_o_series() -> None:
+    """o1 / o3 等の reasoning モデルは temperature を渡さない."""
+    kwargs = namer._build_chat_kwargs(
+        model="o3-mini",
+        messages=[{"role": "user", "content": "x"}],
+        max_tokens=100,
+        temperature=0.5,
+    )
+    assert "temperature" not in kwargs
+    # reasoning モデルも max_completion_tokens 派
+    assert "max_completion_tokens" in kwargs
+
+
+def test_build_chat_kwargs_response_format_toggle() -> None:
+    """json_mode=False のとき response_format を付けない."""
+    with_json = namer._build_chat_kwargs(
+        model="gpt-4o", messages=[], max_tokens=100, json_mode=True,
+    )
+    without_json = namer._build_chat_kwargs(
+        model="gpt-4o", messages=[], max_tokens=100, json_mode=False,
+    )
+    assert with_json["response_format"] == {"type": "json_object"}
+    assert "response_format" not in without_json
+
+
 def test_resolve_duplicates_noop_when_all_unique() -> None:
     """すべてユニークならAPIは呼ばれない."""
     summaries = [
