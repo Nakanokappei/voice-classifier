@@ -100,7 +100,10 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "--name-clusters",
         action="store_true",
-        help="LLM を使って各クラスタに短いラベルを自動生成（Chat API 呼び出し）",
+        help=(
+            "LLM を使って各クラスタに短いラベルと要約テキストを自動生成. "
+            "要約は report.md の代表テキストとして表示され、元の 5 件は検証用に格下げ"
+        ),
     )
     parser.add_argument(
         "--name-model",
@@ -205,22 +208,27 @@ def run(args: argparse.Namespace) -> Path:
         )
         step.set_summary(f"→ 各クラスタから上位{args.top_k}件ずつ")
 
-    # Step 5 (任意): クラスタ名の LLM 生成
+    # Step 5 (任意): クラスタラベル + 要約を LLM で生成
+    cluster_annotations: dict[int, namer.ClusterAnnotation] = {}
     cluster_names: dict[int, str] = {}
     if args.name_clusters:
-        with reporter_ui.step("クラスタ名を生成") as step:
+        with reporter_ui.step("クラスタのラベル+要約を生成") as step:
             step.detail(f"モデル: {args.name_model}")
-            cluster_names = namer.generate_cluster_names(
+            cluster_annotations = namer.generate_cluster_annotations(
                 summaries=summaries,
                 cache_dir=args.cache_dir,
                 model=args.name_model,
             )
-            # 生成ラベルを逐次表示（最大 3 件）
+            cluster_names = {
+                cid: ann.label for cid, ann in cluster_annotations.items()
+            }
             preview = [
-                f"#{cid}:{name}"
-                for cid, name in list(cluster_names.items())[:3]
+                f"#{cid}:{ann.label}"
+                for cid, ann in list(cluster_annotations.items())[:3]
             ]
-            step.set_summary(f"→ {len(cluster_names)}件 例: {', '.join(preview)}")
+            step.set_summary(
+                f"→ {len(cluster_annotations)}件 例: {', '.join(preview)}"
+            )
 
     # Final step: レポート出力
     with reporter_ui.step("レポートを生成") as step:
@@ -236,6 +244,7 @@ def run(args: argparse.Namespace) -> Path:
             input_path=args.input,
             text_col=report_text_col,
             cluster_names=cluster_names,
+            cluster_annotations=cluster_annotations,
             output_format=args.output_format,
         )
         # 出力ファイル名を format から決定して表示

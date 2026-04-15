@@ -272,6 +272,95 @@ def test_both_format_produces_md_and_html_for_report(tmp_path: Path) -> None:
     assert not (tmp_path / "parameter_search.md").exists()
 
 
+def test_report_uses_llm_summary_as_main_representative(tmp_path: Path) -> None:
+    """cluster_annotations が渡されたとき、要約がメイン代表テキストとして表示される."""
+    from src.namer import ClusterAnnotation
+
+    df, summaries = _make_df_and_summaries()
+    best = _make_best(trials=[
+        {"algorithm": "kmeans", "params": {"k": 3}, "silhouette": 0.35,
+         "n_clusters": 3, "n_noise": 0},
+    ])
+    annotations = {
+        0: ClusterAnnotation(
+            label="Aグループ",
+            summary="クラスタ0は A 系の問い合わせが多く見られます.",
+        ),
+        1: ClusterAnnotation(
+            label="Bグループ",
+            summary="クラスタ1は B 系の問い合わせが中心です.",
+        ),
+        2: ClusterAnnotation(
+            label="Cグループ",
+            summary="クラスタ2は C 系の問い合わせをまとめたものです.",
+        ),
+    }
+
+    reporter.write_report(
+        output_dir=tmp_path,
+        df=df, labels=best.labels, summaries=summaries, best=best,
+        input_path="/tmp/x.csv", text_col="text",
+        cluster_annotations=annotations,
+    )
+
+    report_text = (tmp_path / "report.md").read_text(encoding="utf-8")
+    # 要約が代表テキストとして出ている
+    assert "クラスタ0は A 系の問い合わせが多く見られます" in report_text
+    # 検証用セクションが折りたたみで存在
+    assert "<details><summary>検証: 重心付近の実データ" in report_text
+    # ラベルが見出しに反映
+    assert "Aグループ" in report_text
+
+
+def test_clusters_csv_includes_summary_column_when_annotations_given(
+    tmp_path: Path,
+) -> None:
+    """cluster_annotations があると clusters.csv に summary 列が増える."""
+    from src.namer import ClusterAnnotation
+
+    df, summaries = _make_df_and_summaries()
+    best = _make_best(trials=[
+        {"algorithm": "kmeans", "params": {"k": 3}, "silhouette": 0.35,
+         "n_clusters": 3, "n_noise": 0},
+    ])
+    annotations = {
+        0: ClusterAnnotation(label="A", summary="Aの要約文"),
+        1: ClusterAnnotation(label="B", summary="Bの要約文"),
+        2: ClusterAnnotation(label="C", summary="Cの要約文"),
+    }
+
+    reporter.write_report(
+        output_dir=tmp_path,
+        df=df, labels=best.labels, summaries=summaries, best=best,
+        input_path="/tmp/x.csv", text_col="text",
+        cluster_annotations=annotations,
+    )
+
+    import pandas as pd
+    clusters = pd.read_csv(tmp_path / "clusters.csv")
+    assert "summary" in clusters.columns
+    assert "Aの要約文" in clusters["summary"].tolist()
+
+
+def test_clusters_csv_omits_summary_without_annotations(tmp_path: Path) -> None:
+    """annotations 無しの時は summary 列を追加しない（列が増えないこと）."""
+    df, summaries = _make_df_and_summaries()
+    best = _make_best(trials=[
+        {"algorithm": "kmeans", "params": {"k": 3}, "silhouette": 0.35,
+         "n_clusters": 3, "n_noise": 0},
+    ])
+
+    reporter.write_report(
+        output_dir=tmp_path,
+        df=df, labels=best.labels, summaries=summaries, best=best,
+        input_path="/tmp/x.csv", text_col="text",
+    )
+
+    import pandas as pd
+    clusters = pd.read_csv(tmp_path / "clusters.csv")
+    assert "summary" not in clusters.columns
+
+
 def test_params_json_includes_search_metadata(tmp_path: Path) -> None:
     """params.json に探索メタ情報（PCA・サンプル数・フィルタ閾値）が記録される."""
     df, summaries = _make_df_and_summaries()

@@ -18,6 +18,7 @@ import numpy as np
 import pandas as pd
 
 from .clusterer import ClusterSummary, NOISE_LABEL
+from .namer import ClusterAnnotation
 from .tuner import BestConfig
 
 logger = logging.getLogger(__name__)
@@ -77,6 +78,7 @@ def write_report(
     input_path: Path | str,
     text_col: str,
     cluster_names: dict[int, str] | None = None,
+    cluster_annotations: dict[int, ClusterAnnotation] | None = None,
     output_format: OutputFormat = "md",
 ) -> None:
     """成果物を `output_dir` に書き出す.
@@ -94,7 +96,14 @@ def write_report(
     """
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
-    names = cluster_names or {}
+    annotations = cluster_annotations or {}
+
+    # cluster_names が明示指定された場合はそれを優先、
+    # そうでなければ annotations から label を抽出
+    if cluster_names:
+        names = cluster_names
+    else:
+        names = {cid: ann.label for cid, ann in annotations.items()}
 
     # 常に出力（機械可読）
     # 元ファイル名をプレフィックスにして <元ファイル名>_classified.csv を生成
@@ -102,13 +111,16 @@ def write_report(
     _write_classified_rows_csv(
         output_dir / f"{input_stem}_classified.csv", df, labels, names
     )
-    _write_cluster_list_csv(output_dir / "clusters.csv", summaries, names)
+    _write_cluster_list_csv(
+        output_dir / "clusters.csv", summaries, names, annotations
+    )
     _write_params_json(output_dir / "params.json", best, input_path, text_col, names)
 
     # Markdown 文字列を生成（両形式で共通利用）
     clustering_md = _build_clustering_report_md(
         df=df, summaries=summaries, best=best,
-        input_path=input_path, text_col=text_col, cluster_names=names,
+        input_path=input_path, text_col=text_col,
+        cluster_names=names, cluster_annotations=annotations,
     )
     parameter_search_md = _build_parameter_search_md(
         best=best, input_path=input_path, text_col=text_col,
@@ -168,23 +180,26 @@ def _write_cluster_list_csv(
     path: Path,
     summaries: list[ClusterSummary],
     cluster_names: dict[int, str],
+    annotations: dict[int, ClusterAnnotation] | None = None,
 ) -> None:
     """クラスタ1件=1行のサマリ CSV を保存.
 
     列:
-        cluster_id, cluster_name, size, rep_1, rep_2, ..., rep_N
+        cluster_id, cluster_name, size, summary, rep_1, rep_2, ..., rep_N
+
+    - summary: LLM 生成の要約テキスト（--name-clusters 指定時のみ、なければ空列）
+    - rep_1..N: 重心付近の実データ（検証用）
 
     ソート規則:
         1. ノイズ（cluster_id == -1）は末尾
         2. それ以外はサイズ降順
     """
-    # 代表テキスト列の幅を揃えるため、最大件数を求める
+    annotations = annotations or {}
     max_reps = max(
         (len(s.representative_texts) for s in summaries),
         default=0,
     )
 
-    # 並び替え: ノイズは末尾、それ以外はサイズ降順
     non_noise = sorted(
         [s for s in summaries if s.cluster_id != NOISE_LABEL],
         key=lambda s: s.size,
@@ -193,13 +208,15 @@ def _write_cluster_list_csv(
     noise = [s for s in summaries if s.cluster_id == NOISE_LABEL]
     ordered = non_noise + noise
 
-    columns = ["cluster_id", "cluster_name", "size"] + [
-        f"rep_{i + 1}" for i in range(max_reps)
-    ]
+    # summary 列は annotations がある場合のみ追加
+    has_summaries = bool(annotations)
+    columns = ["cluster_id", "cluster_name", "size"]
+    if has_summaries:
+        columns.append("summary")
+    columns.extend(f"rep_{i + 1}" for i in range(max_reps))
 
     rows: list[dict[str, object]] = []
     for summary in ordered:
-        # ノイズクラスタは代表テキストなし、ラベルは常に「未分類」相当
         name = cluster_names.get(summary.cluster_id, "")
         if summary.cluster_id == NOISE_LABEL and not name:
             name = "未分類"
@@ -209,7 +226,9 @@ def _write_cluster_list_csv(
             "cluster_name": name,
             "size": int(summary.size),
         }
-        # 代表テキストを rep_1..rep_N に割り当て（足りない列は空文字）
+        if has_summaries:
+            ann = annotations.get(summary.cluster_id)
+            row["summary"] = ann.summary if ann else ""
         for i in range(max_reps):
             rep = (
                 summary.representative_texts[i]
@@ -276,8 +295,18 @@ def _build_clustering_report_md(
     input_path: Path | str,
     text_col: str,
     cluster_names: dict[int, str],
+    cluster_annotations: dict[int, ClusterAnnotation] | None = None,
 ) -> str:
-    """クラスタリング結果レポートの Markdown 文字列を生成."""
+    """クラスタリング結果レポートの Markdown 文字列を生成.
+
+    各クラスタの表示:
+        annotations がある場合:
+            - メイン代表テキスト: LLM 生成の summary
+            - 折りたたみ内: 重心付近の 5 件（検証用）
+        annotations がない場合:
+            - 従来通り 5 件をそのまま列挙
+    """
+    annotations = cluster_annotations or {}
     lines: list[str] = []
     lines.append("# クラスタリング結果レポート")
     lines.append("")
@@ -328,18 +357,43 @@ def _build_clustering_report_md(
         )
         lines.append(heading)
         lines.append("")
+
         if not summary.representative_texts:
             lines.append("_代表テキストなし_")
             lines.append("")
             continue
-        lines.append("**代表テキスト（重心に近い順）:**")
-        lines.append("")
-        for idx, text in enumerate(summary.representative_texts, start=1):
-            display = text.replace("\n", " ")
-            if len(display) > 200:
-                display = display[:200] + "…"
-            lines.append(f"{idx}. {display}")
-        lines.append("")
+
+        annotation = annotations.get(summary.cluster_id)
+        if annotation and annotation.summary:
+            # メイン代表テキスト: LLM 生成の要約
+            lines.append("**代表テキスト:**")
+            lines.append("")
+            lines.append(annotation.summary)
+            lines.append("")
+            # 検証用に重心付近の 5 件を折りたたみで
+            lines.append(
+                f"<details><summary>検証: 重心付近の実データ"
+                f"（{len(summary.representative_texts)}件）</summary>"
+            )
+            lines.append("")
+            for idx, text in enumerate(summary.representative_texts, start=1):
+                display = text.replace("\n", " ")
+                if len(display) > 200:
+                    display = display[:200] + "…"
+                lines.append(f"{idx}. {display}")
+            lines.append("")
+            lines.append("</details>")
+            lines.append("")
+        else:
+            # annotation なし: 従来通り 5 件をそのまま列挙
+            lines.append("**代表テキスト（重心に近い順）:**")
+            lines.append("")
+            for idx, text in enumerate(summary.representative_texts, start=1):
+                display = text.replace("\n", " ")
+                if len(display) > 200:
+                    display = display[:200] + "…"
+                lines.append(f"{idx}. {display}")
+            lines.append("")
 
     # ノイズ
     noise_summary = next((s for s in summaries if s.cluster_id == NOISE_LABEL), None)

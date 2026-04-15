@@ -1,4 +1,4 @@
-"""namer モジュールのテスト — OpenAI Chat をモックしてキャッシュ挙動を検証."""
+"""namer モジュールのテスト — OpenAI Chat をモックして label+summary 生成を検証."""
 
 from __future__ import annotations
 
@@ -33,13 +33,13 @@ class _FakeChatResponse:
 
 
 class _CountingChatClient:
-    """OpenAI.chat.completions.create を模倣するテストダブル."""
+    """OpenAI.chat.completions.create を模倣. label+summary の JSON を返す."""
 
     def __init__(self) -> None:
         self.call_count = 0
         self.requested_prompts: list[str] = []
         self._lock = threading.Lock()
-        # `.chat.completions.create(...)` 形式のためネスト
+        # `.chat.completions.create(...)` のネスト模倣
         self.chat = self
         self.completions = self
 
@@ -48,15 +48,21 @@ class _CountingChatClient:
             self.call_count += 1
             user_msg = next(m for m in messages if m["role"] == "user")
             self.requested_prompts.append(user_msg["content"])
-        # 代表テキスト内の最初の文字を使って決定的なラベルを返す
+        # 代表テキストの先頭文字を利用してラベル・要約を決定的に生成
         user_content = messages[-1]["content"]
         first_char = next(
-            (c for line in user_content.splitlines() if line.startswith("- ")
-             for c in line[2:] if c.strip()),
+            (
+                c for line in user_content.splitlines() if line.startswith("- ")
+                for c in line[2:] if c.strip()
+            ),
             "X",
         )
+        payload = (
+            f'{{"label": "{first_char}系の問題", '
+            f'"summary": "{first_char}に関する代表的な問い合わせをまとめたクラスタです."}}'
+        )
         return _FakeChatResponse(
-            choices=[_FakeChoice(message=_FakeMessage(content=f"{first_char}系の問題"))]
+            choices=[_FakeChoice(message=_FakeMessage(content=payload))]
         )
 
 
@@ -74,24 +80,28 @@ def _make_summary(cid: int, texts: list[str]) -> ClusterSummary:
 # ---------------------------------------------------------------------------
 
 
-def test_generate_names_calls_chat_for_each_cluster(tmp_path: Path) -> None:
+def test_generate_annotations_calls_chat_for_each_cluster(tmp_path: Path) -> None:
     """各クラスタに対して 1 回ずつ Chat API が呼ばれること."""
     summaries = [
         _make_summary(0, ["充電ができない", "充電できない"]),
         _make_summary(1, ["音が出ない", "片側聞こえない"]),
-        _make_summary(NOISE_LABEL, []),  # ノイズは呼ばない
+        _make_summary(NOISE_LABEL, []),
     ]
 
     fake_client = _CountingChatClient()
     with patch.object(namer, "_make_client", return_value=fake_client):
-        result = namer.generate_cluster_names(
+        result = namer.generate_cluster_annotations(
             summaries, cache_dir=tmp_path / "cache", model="test-model"
         )
 
     assert fake_client.call_count == 2  # ノイズはスキップ
-    assert result[0].endswith("問題")
-    assert result[1].endswith("問題")
-    assert result[NOISE_LABEL] == "未分類"
+    # 各クラスタに label と summary が入っている
+    assert result[0].label.endswith("問題")
+    assert "に関する代表的な問い合わせ" in result[0].summary
+    assert result[1].label.endswith("問題")
+    # ノイズは固定文言
+    assert result[NOISE_LABEL].label == "未分類"
+    assert "密度の低い領域" in result[NOISE_LABEL].summary
 
 
 def test_cache_hit_skips_api(tmp_path: Path) -> None:
@@ -101,59 +111,59 @@ def test_cache_hit_skips_api(tmp_path: Path) -> None:
 
     fake_client = _CountingChatClient()
     with patch.object(namer, "_make_client", return_value=fake_client):
-        namer.generate_cluster_names(summaries, cache_dir=cache_dir, model="m")
-        # 2 回目呼び出し: API を叩かないはず
-        namer.generate_cluster_names(summaries, cache_dir=cache_dir, model="m")
+        namer.generate_cluster_annotations(summaries, cache_dir=cache_dir, model="m")
+        namer.generate_cluster_annotations(summaries, cache_dir=cache_dir, model="m")
 
     assert fake_client.call_count == 1
 
 
-def test_empty_representatives_fallback(tmp_path: Path) -> None:
-    """代表テキストが無いクラスタはフォールバックラベルで、API を呼ばない."""
-    summaries = [_make_summary(5, [])]  # rep_texts=[]
+def test_generate_cluster_names_wraps_annotations(tmp_path: Path) -> None:
+    """後方互換ラッパ: generate_cluster_names は label のみの dict を返す."""
+    summaries = [_make_summary(0, ["テキスト"])]
     fake_client = _CountingChatClient()
     with patch.object(namer, "_make_client", return_value=fake_client):
-        result = namer.generate_cluster_names(
+        names = namer.generate_cluster_names(
             summaries, cache_dir=tmp_path / "c", model="m"
         )
-    assert result[5] == "クラスタ #5"
+    # str 値のみで、ClusterAnnotation を返さない
+    assert isinstance(names[0], str)
+    assert names[0].endswith("問題")
+
+
+def test_empty_representatives_fallback(tmp_path: Path) -> None:
+    """代表テキストが無いクラスタはフォールバックで、API を呼ばない."""
+    summaries = [_make_summary(5, [])]
+    fake_client = _CountingChatClient()
+    with patch.object(namer, "_make_client", return_value=fake_client):
+        result = namer.generate_cluster_annotations(
+            summaries, cache_dir=tmp_path / "c", model="m"
+        )
+    assert result[5].label == "クラスタ #5"
+    assert result[5].summary == "（代表テキストなし）"
     assert fake_client.call_count == 0
 
 
-def test_sanitize_strips_quotes_and_truncates() -> None:
-    """出力クリーニングがクォート除去と長さ制限を行うこと."""
-    assert namer._sanitize_label('「充電不良」') == "充電不良"
-    assert namer._sanitize_label("\"結果\"\n説明文") == "結果"
-    long = "あ" * 50
-    assert len(namer._sanitize_label(long)) == 30
-    assert namer._sanitize_label("   ") == "無題"
+def test_parse_annotation_handles_malformed_json() -> None:
+    """LLM 出力が不正 JSON でも解析失敗として返す."""
+    parsed = namer._parse_annotation_json("not a json")
+    assert parsed["label"] == "解析失敗"
+    # 原文は summary に格納
 
 
-def test_cache_file_also_saves_json(tmp_path: Path) -> None:
-    """pickle と並行して、人間可読な JSON も残ること."""
-    summaries = [_make_summary(0, ["test"])]
-    cache_dir = tmp_path / "cache"
-
-    fake_client = _CountingChatClient()
-    with patch.object(namer, "_make_client", return_value=fake_client):
-        namer.generate_cluster_names(summaries, cache_dir=cache_dir, model="m")
-
-    pickle_path = cache_dir / "cluster_names_m.pkl"
-    json_path = cache_dir / "cluster_names_m.json"
-    assert pickle_path.exists()
-    assert json_path.exists()
-
-    # 内容一致
-    with pickle_path.open("rb") as f:
-        pkl_cache = pickle.load(f)
-    import json
-    with json_path.open() as f:
-        json_cache = json.load(f)
-    assert pkl_cache == json_cache
+def test_sanitize_summary_strips_quotes_and_truncates() -> None:
+    """要約クリーニングの基本動作."""
+    assert namer._sanitize_summary('"これは要約です"') == "これは要約です"
+    # 複数行は空白で連結
+    assert namer._sanitize_summary("行1\n行2\n行3") == "行1 行2 行3"
+    # 超長は 400 字でトランケート
+    long = "あ" * 500
+    result = namer._sanitize_summary(long)
+    assert result.endswith("…")
+    assert len(result) == 401  # 400 + "…"
 
 
-def test_failure_falls_back_to_default_name(tmp_path: Path) -> None:
-    """API 失敗時はフォールバックラベルで継続し、例外を漏らさない."""
+def test_failure_falls_back_to_default(tmp_path: Path) -> None:
+    """API 失敗時はフォールバック値で継続."""
 
     class _AlwaysFailClient:
         def __init__(self):
@@ -165,9 +175,33 @@ def test_failure_falls_back_to_default_name(tmp_path: Path) -> None:
 
     summaries = [_make_summary(7, ["text"])]
     with patch.object(namer, "_make_client", return_value=_AlwaysFailClient()):
-        # _request_with_retry の中でリトライ上限を超えるので RuntimeError が throw されるが、
-        # _fetch_parallel がキャッチしてデフォルトラベルに置き換える
-        result = namer.generate_cluster_names(
+        result = namer.generate_cluster_annotations(
             summaries, cache_dir=tmp_path / "c", model="m"
         )
-    assert result[7] == "クラスタ #7"
+    assert result[7].label == "クラスタ #7"
+    assert result[7].summary == "（生成失敗）"
+
+
+def test_cache_file_also_saves_json(tmp_path: Path) -> None:
+    """pickle と並行して、人間可読な JSON も残ること."""
+    summaries = [_make_summary(0, ["test"])]
+    cache_dir = tmp_path / "cache"
+
+    fake_client = _CountingChatClient()
+    with patch.object(namer, "_make_client", return_value=fake_client):
+        namer.generate_cluster_annotations(summaries, cache_dir=cache_dir, model="m")
+
+    pickle_path = cache_dir / "cluster_annotations_v2_m.pkl"
+    json_path = cache_dir / "cluster_annotations_v2_m.json"
+    assert pickle_path.exists()
+    assert json_path.exists()
+
+    import json
+    with pickle_path.open("rb") as f:
+        pkl_cache = pickle.load(f)
+    with json_path.open() as f:
+        json_cache = json.load(f)
+    assert pkl_cache == json_cache
+    # 内容は label + summary を含む
+    first = next(iter(json_cache.values()))
+    assert "label" in first and "summary" in first
