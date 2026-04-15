@@ -363,37 +363,30 @@ def _build_clustering_report_md(
             lines.append("")
             continue
 
+        # 代表テキスト: 要約が利用可能ならそれを、なければ「要約未生成」を明示
         annotation = annotations.get(summary.cluster_id)
+        lines.append("**代表テキスト:**")
+        lines.append("")
         if annotation and annotation.summary:
-            # メイン代表テキスト: LLM 生成の要約
-            lines.append("**代表テキスト:**")
-            lines.append("")
             lines.append(annotation.summary)
-            lines.append("")
-            # 検証用に重心付近の 5 件を折りたたみで
-            lines.append(
-                f"<details><summary>検証: 重心付近の実データ"
-                f"（{len(summary.representative_texts)}件）</summary>"
-            )
-            lines.append("")
-            for idx, text in enumerate(summary.representative_texts, start=1):
-                display = text.replace("\n", " ")
-                if len(display) > 200:
-                    display = display[:200] + "…"
-                lines.append(f"{idx}. {display}")
-            lines.append("")
-            lines.append("</details>")
-            lines.append("")
         else:
-            # annotation なし: 従来通り 5 件をそのまま列挙
-            lines.append("**代表テキスト（重心に近い順）:**")
-            lines.append("")
-            for idx, text in enumerate(summary.representative_texts, start=1):
-                display = text.replace("\n", " ")
-                if len(display) > 200:
-                    display = display[:200] + "…"
-                lines.append(f"{idx}. {display}")
-            lines.append("")
+            lines.append(
+                "_（要約未生成. `--name-clusters` を付けて再実行すると "
+                "LLM による要約が得られます）_"
+            )
+        lines.append("")
+
+        # 5 件の生データは常に見える形で並べる（検証用）
+        lines.append(
+            f"**重心に近い実データ（{len(summary.representative_texts)}件）:**"
+        )
+        lines.append("")
+        for idx, text in enumerate(summary.representative_texts, start=1):
+            display = text.replace("\n", " ")
+            if len(display) > 200:
+                display = display[:200] + "…"
+            lines.append(f"{idx}. {display}")
+        lines.append("")
 
     # ノイズ
     noise_summary = next((s for s in summaries if s.cluster_id == NOISE_LABEL), None)

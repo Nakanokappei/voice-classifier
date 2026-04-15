@@ -74,7 +74,7 @@ def test_load_csv_missing_column_raises(tmp_path: Path) -> None:
     csv_path = tmp_path / "input.csv"
     _write_csv(csv_path, "other\nabc\n")
 
-    with pytest.raises(ValueError, match="対応内容"):
+    with pytest.raises(ValueError, match="対応内容|not found"):
         loader.load_csv(csv_path, text_col="対応内容")
 
 
@@ -167,7 +167,7 @@ def test_empty_file_raises_value_error(tmp_path: Path) -> None:
     """サイズ 0 ファイルは ValueError（早期検出）."""
     csv_path = tmp_path / "empty.csv"
     csv_path.write_bytes(b"")
-    with pytest.raises(ValueError, match="空ファイル"):
+    with pytest.raises(ValueError, match="empty"):
         loader.load_csv(csv_path, text_col="whatever")
 
 
@@ -179,7 +179,7 @@ def test_duplicate_column_names_raises(tmp_path: Path) -> None:
         "対応内容,対応内容\n"
         "text1,text2\n",
     )
-    with pytest.raises(ValueError, match="列名が重複"):
+    with pytest.raises(ValueError, match="duplicate"):
         loader.load_csv(csv_path, text_col="対応内容")
 
 
@@ -191,7 +191,7 @@ def test_malformed_csv_raises_value_error(tmp_path: Path) -> None:
         'a,b,c\n"unclosed quote,x,y\nnext_row,p,q\n',
         encoding="utf-8",
     )
-    with pytest.raises(ValueError, match="列数が異なる行"):
+    with pytest.raises(ValueError, match="Column count mismatch"):
         loader.load_csv(csv_path, text_col="a")
 
 
@@ -313,7 +313,7 @@ def test_text_col_and_text_cols_are_exclusive(tmp_path: Path) -> None:
     csv_path = tmp_path / "x.csv"
     _write_csv(csv_path, "a,b\n1,2\n")
 
-    with pytest.raises(ValueError, match="同時に指定"):
+    with pytest.raises(ValueError, match="mutually exclusive"):
         loader.load_csv(csv_path, text_col="a", text_cols=["a", "b"])
 
 
@@ -322,5 +322,5 @@ def test_neither_text_col_nor_text_cols_raises(tmp_path: Path) -> None:
     csv_path = tmp_path / "x.csv"
     _write_csv(csv_path, "a\n1\n")
 
-    with pytest.raises(ValueError, match="いずれか"):
+    with pytest.raises(ValueError, match="Specify either"):
         loader.load_csv(csv_path)

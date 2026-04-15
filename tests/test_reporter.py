@@ -306,8 +306,10 @@ def test_report_uses_llm_summary_as_main_representative(tmp_path: Path) -> None:
     report_text = (tmp_path / "report.md").read_text(encoding="utf-8")
     # 要約が代表テキストとして出ている
     assert "クラスタ0は A 系の問い合わせが多く見られます" in report_text
-    # 検証用セクションが折りたたみで存在
-    assert "<details><summary>検証: 重心付近の実データ" in report_text
+    # 重心付近の実データセクションが常時可視で存在
+    assert "**重心に近い実データ" in report_text
+    # 折りたたみではなく直接可視
+    assert "<details>" not in report_text
     # ラベルが見出しに反映
     assert "Aグループ" in report_text
 

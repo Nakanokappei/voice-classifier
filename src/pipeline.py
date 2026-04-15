@@ -106,10 +106,13 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--max-clusters", type=int, default=20, help="KMeans 上限K")
     parser.add_argument(
         "--name-clusters",
-        action="store_true",
+        action=argparse.BooleanOptionalAction,
+        default=True,
         help=(
-            "LLM を使って各クラスタに短いラベルと要約テキストを自動生成. "
-            "要約は report.md の代表テキストとして表示され、元の 5 件は検証用に格下げ"
+            "Generate LLM label and summary for each cluster (default: on). "
+            "Summary is shown as the main representative text; the 5 "
+            "centroid-near raw items are kept as verification data below. "
+            "Disable with --no-name-clusters to skip LLM calls."
         ),
     )
     parser.add_argument(

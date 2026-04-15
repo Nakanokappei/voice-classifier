@@ -1,12 +1,13 @@
-"""CSVローダー — 入力CSVを堅牢に読み込み、指定テキスト列を正規化する.
+"""CSV loader — robustly reads the input CSV and normalises the chosen text column.
 
-責務:
-    - BOM (UTF-8 / UTF-16LE / UTF-16BE) を優先判定
-    - 文字コード候補を順に試行（UTF-8 系 → Shift_JIS → EUC-JP）
-    - RFC 4180 準拠（クオート内改行、ダブルクオートエスケープに対応）
-    - CRLF/LF/CR 混在の改行を許容
-    - 列名の重複・列数不整合を早期検出して明快なエラー
-    - 単一列 (`text_col`) と複数列結合 (`text_cols`) の両モード
+Responsibilities:
+    - Detect BOM (UTF-8 / UTF-16 LE / UTF-16 BE) before trying encodings.
+    - Fall back through a candidate encoding list (UTF-8 → Shift_JIS → EUC-JP).
+    - RFC 4180 compliant parsing (supports quoted newlines and escaped quotes).
+    - Tolerate CRLF / LF / CR line-ending mixes.
+    - Detect duplicate column names and column-count mismatches up front.
+    - Support both single-column (`text_col`) and multi-column (`text_cols`)
+      embedding modes.
 """
 
 from __future__ import annotations
@@ -21,20 +22,20 @@ import pandas as pd
 
 logger = logging.getLogger(__name__)
 
-# 埋め込みAPIが許容する上限より手前で切り捨てる（日本語安全圏）
+# Truncate texts just below what the embedding API can accept (safe for Japanese too).
 MAX_TEXT_LENGTH: int = 4000
 
-# BOM シグネチャ. 先頭バイトで優先的に判定
+# Byte-order marks. Checked first so we pick the right encoding without guessing.
 BOM_SIGNATURES: tuple[tuple[bytes, str], ...] = (
     (b"\xef\xbb\xbf", "utf-8-sig"),
     (b"\xff\xfe", "utf-16-le"),
     (b"\xfe\xff", "utf-16-be"),
 )
 
-# BOM が無い場合に試行するエンコーディング順
+# Candidate encodings to try when there is no BOM. Order matters.
 ENCODING_CANDIDATES: tuple[str, ...] = ("utf-8", "cp932", "euc-jp", "iso-2022-jp")
 
-# 自動推定で「テキスト列っぽい」と判定する平均長の下限
+# Minimum average character length for a column to look like "a text column".
 AUTO_DETECT_MIN_AVG_LENGTH: float = 10.0
 
 
@@ -44,57 +45,61 @@ def load_csv(
     text_cols: list[str] | None = None,
     column_labels: dict[str, str] | None = None,
 ) -> pd.DataFrame:
-    """CSVを読み込み、テキスト列を正規化した DataFrame を返す.
+    """Load a CSV and return a DataFrame with a normalised text column.
 
     Args:
-        path: 入力CSVパス
-        text_col: 単一列モードの列名
-        text_cols: 複数列モードの列名リスト（`text_col` と排他）
-        column_labels: 複数列モード時の `列名 → ラベル` マップ. 省略時は列名をそのまま使用
+        path: input CSV path
+        text_col: column name for the single-column mode
+        text_cols: list of column names for the multi-column mode
+            (mutually exclusive with `text_col`)
+        column_labels: optional `column name -> label` mapping used by the
+            multi-column mode; defaults to the column name itself
 
     Returns:
-        元CSVの全列 + `_normalized_text`, `_duplicate_count` 列を付与した DataFrame
+        The original DataFrame plus `_normalized_text` and `_duplicate_count`
+        columns, deduplicated on the normalised text.
 
     Raises:
-        FileNotFoundError: 指定パスが存在しない
-        ValueError: 列指定が無効、または整合性エラー
+        FileNotFoundError: `path` does not exist
+        ValueError: invalid column spec, empty file, or structural inconsistency
     """
     path = Path(path)
     if not path.exists():
-        raise FileNotFoundError(f"入力CSVが見つかりません: {path}")
+        raise FileNotFoundError(f"Input CSV not found: {path}")
     if path.stat().st_size == 0:
-        raise ValueError(f"入力CSVが空ファイルです: {path}")
+        raise ValueError(f"Input CSV is empty: {path}")
 
-    # 列指定モードの検証
+    # Validate the column selection mode.
     if text_col is None and not text_cols:
         raise ValueError(
-            "`text_col` または `text_cols` のいずれかを指定してください"
+            "Specify either `text_col` or `text_cols`"
         )
     if text_col is not None and text_cols:
-        raise ValueError("`text_col` と `text_cols` は同時に指定できません")
+        raise ValueError("`text_col` and `text_cols` are mutually exclusive")
 
-    # エンコーディングを先行決定（BOM 優先）
+    # Decide encoding up front (BOM wins over fallback guesses).
     encoding = _detect_encoding(path)
-    logger.info("encoding=%s で読込 (%s)", encoding, path.name)
+    logger.info("Loading %s with encoding=%s", path.name, encoding)
 
-    # pandas が自動リネームする前の生ヘッダで重複列名を検出 + 列数整合性チェック
+    # Raw-parse the header + rows for structural checks that pandas would hide
+    # (duplicate column names, column-count mismatches).
     _validate_raw_structure(path, encoding)
 
     df = _read_csv_rfc4180(path, encoding)
 
-    # CSV 全体の基本整合性
+    # Final DataFrame-level sanity checks.
     _validate_csv_structure(df, path)
 
-    # 列指定を検証
+    # Confirm every requested column actually exists.
     requested_cols = [text_col] if text_col is not None else list(text_cols or [])
     for col in requested_cols:
         if col not in df.columns:
             available = ", ".join(df.columns.astype(str))
             raise ValueError(
-                f"指定列 '{col}' がCSVに存在しません. 利用可能な列: {available}"
+                f"Column '{col}' not found in CSV. Available columns: {available}"
             )
 
-    # 正規化テキストを構築
+    # Build the normalised text column.
     if text_col is not None:
         df["_normalized_text"] = df[text_col].map(_normalize_text)
     else:
@@ -102,41 +107,44 @@ def load_csv(
             df, requested_cols, column_labels or {}
         )
 
-    # 空テキスト行を除外
+    # Drop rows that became empty after normalisation.
     before = len(df)
     df = df[df["_normalized_text"].str.len() > 0].copy()
     dropped = before - len(df)
     if dropped:
-        logger.info("空テキスト %d 行をドロップしました", dropped)
+        logger.info("Dropped %d empty text rows", dropped)
 
     if df.empty:
-        raise ValueError("正規化後に有効なテキスト行がありません")
+        raise ValueError("No valid text rows remain after normalisation")
 
-    # 重複テキストを集約
+    # Deduplicate identical texts (count is preserved in `_duplicate_count`).
     df = _collapse_duplicates(df)
 
-    # 長大テキストはトランケート
+    # Truncate overly long texts to the safe length.
     df["_normalized_text"] = df["_normalized_text"].map(_truncate)
 
-    logger.info("読込完了: %d 行（正規化・重複集約後）", len(df))
+    logger.info(
+        "Load complete: %d rows (after normalisation and deduplication)", len(df)
+    )
     return df.reset_index(drop=True)
 
 
 # ---------------------------------------------------------------------------
-# 列候補推定（suggest_text_columns）
+# Column candidate inference (suggest_text_columns)
 # ---------------------------------------------------------------------------
 
 
 @dataclass
 class ColumnCandidate:
-    """テキスト列候補の評価情報.
+    """Metadata for a "possible text column" candidate.
 
     Attributes:
-        name: 列名
-        avg_length: 平均文字数（空文字列は除外）
-        non_empty_ratio: 非空の行割合
-        unique_ratio: ユニーク値の割合（重複が多いと低い = カテゴリ列の可能性）
-        sample_values: 判定根拠を示す最大3件のサンプル
+        name: column name
+        avg_length: average character length over non-empty values
+        non_empty_ratio: fraction of rows that are non-empty in this column
+        unique_ratio: unique-value ratio among the non-empty rows; categorical
+            columns with few distinct values score low
+        sample_values: up to 3 examples for human inspection
     """
 
     name: str
@@ -147,19 +155,20 @@ class ColumnCandidate:
 
     @property
     def score(self) -> float:
-        """テキスト列らしさのスコア.
+        """Likelihood of being a text column.
 
-        長文かつ非空率が高く、ユニーク率も高いほど高スコア.
-        カテゴリ列（"返品"/"配送" のような少数値の繰り返し）は低スコアに落ちる.
+        Longer average length, high non-empty rate, and high uniqueness push the
+        score up. Categorical columns (e.g. "return"/"delivery" repeated) end up
+        low.
         """
         return self.avg_length * self.non_empty_ratio * (0.5 + 0.5 * self.unique_ratio)
 
 
 def suggest_text_columns(path: Path | str, top_k: int = 5) -> list[ColumnCandidate]:
-    """CSVの各列を解析し、テキスト列として有望な候補を score 降順で返す."""
+    """Score every column and return the most text-like ones in descending order."""
     path = Path(path)
     if not path.exists():
-        raise FileNotFoundError(f"入力CSVが見つかりません: {path}")
+        raise FileNotFoundError(f"Input CSV not found: {path}")
 
     encoding = _detect_encoding(path)
     df = _read_csv_rfc4180(path, encoding)
@@ -203,16 +212,16 @@ def suggest_text_columns(path: Path | str, top_k: int = 5) -> list[ColumnCandida
 
 
 def _detect_encoding(path: Path) -> str:
-    """BOM を優先し、なければ候補を順に試行して適切なエンコーディングを決定."""
+    """Pick an encoding: BOM wins; otherwise try each candidate in order."""
     with path.open("rb") as f:
         head = f.read(4)
 
-    # BOM 優先
+    # BOM-based detection.
     for signature, encoding in BOM_SIGNATURES:
         if head.startswith(signature):
             return encoding
 
-    # BOM なし: 候補を順に試して decode 可能か検査
+    # No BOM: try each candidate and keep the first that decodes.
     sample_bytes = _peek(path, n_bytes=65536)
     for encoding in ENCODING_CANDIDATES:
         try:
@@ -221,13 +230,13 @@ def _detect_encoding(path: Path) -> str:
         except UnicodeDecodeError:
             continue
 
-    # 全失敗は UTF-8 にフォールバック（read 時にエラーになって呼び出し元に伝わる）
-    logger.warning("エンコーディング自動判定失敗. UTF-8 とみなして読み込みます")
+    # Everything failed; default to UTF-8 so the caller gets a proper error later.
+    logger.warning("Encoding auto-detection failed; assuming UTF-8")
     return "utf-8"
 
 
 def _peek(path: Path, n_bytes: int = 65536) -> bytes:
-    """ファイル先頭 n バイトを読み取り."""
+    """Read the first `n_bytes` of the file."""
     with path.open("rb") as f:
         return f.read(n_bytes)
 
@@ -238,11 +247,11 @@ def _peek(path: Path, n_bytes: int = 65536) -> bytes:
 
 
 def _read_csv_rfc4180(path: Path, encoding: str) -> pd.DataFrame:
-    """RFC 4180 準拠で CSV を読む.
+    """Read the CSV in an RFC 4180 compliant way.
 
-    - pandas の C エンジンは RFC 4180 をほぼ満たす（クオート内改行・エスケープ対応）
-    - ``keep_default_na=False`` で "nan" や "null" などを文字列として扱う
-    - ``dtype=str`` で全列を文字列に統一（数値混在の text_col を保護）
+    - pandas' C engine handles quoted newlines and escaped quotes by default.
+    - ``keep_default_na=False`` so strings like "nan"/"null" stay as strings.
+    - ``dtype=str`` keeps numeric-looking text columns from being coerced.
     """
     try:
         return pd.read_csv(
@@ -250,16 +259,15 @@ def _read_csv_rfc4180(path: Path, encoding: str) -> pd.DataFrame:
             encoding=encoding,
             dtype=str,
             keep_default_na=False,
-            # quoting=csv.QUOTE_MINIMAL はデフォルト
-            # pandas はデフォルトで CRLF/LF/CR 混在をハンドル（universal newlines）
+            # QUOTE_MINIMAL is the default; CRLF/LF/CR mixes are handled natively.
         )
     except pd.errors.ParserError as exc:
-        raise ValueError(f"CSVの構文が壊れています ({path}): {exc}") from exc
+        raise ValueError(f"CSV syntax is broken ({path}): {exc}") from exc
     except pd.errors.EmptyDataError as exc:
-        raise ValueError(f"CSVにヘッダも行もありません ({path}): {exc}") from exc
+        raise ValueError(f"CSV has no header or rows ({path}): {exc}") from exc
     except UnicodeDecodeError as exc:
         raise ValueError(
-            f"encoding={encoding} でデコードに失敗しました ({path}): {exc}"
+            f"Failed to decode with encoding={encoding} ({path}): {exc}"
         ) from exc
 
 
@@ -269,18 +277,15 @@ def _read_csv_rfc4180(path: Path, encoding: str) -> pd.DataFrame:
 
 
 def _validate_raw_structure(path: Path, encoding: str) -> None:
-    """pandas の自動補正前にヘッダ・列数を生パースで確認.
+    """Raw-parse the header and rows to catch issues pandas would paper over.
 
-    Python の `csv` モジュールで行ごとに読み、以下を検出:
-    - 列名の重複（pandas 2.0+ は .1 suffix でリネームして隠す）
-    - データ行の列数がヘッダと一致しない（最初の10件までを報告）
+    pandas 2.0+ silently renames duplicate columns (`col`, `col.1`), so we need
+    the raw header to detect duplicates. We also verify that every data row has
+    the same number of columns as the header.
 
     Raises:
-        ValueError: 上記のいずれかが見つかった場合
+        ValueError: on duplicates or column-count mismatches.
     """
-    # BOM 指定時は `encoding="utf-8-sig"` が pandas/io で BOM を自動除去.
-    # csv モジュールは BOM を見る前に utf-8 でデコードしないと誤判定するため、
-    # 対応する Python デコーダ名に正規化してから open する.
     py_encoding = _to_python_codec(encoding)
 
     try:
@@ -290,10 +295,10 @@ def _validate_raw_structure(path: Path, encoding: str) -> None:
             if header is None:
                 return
 
-            # ヘッダ先頭に残った BOM 文字を除去（utf-16 等で openrb 経由で来ると残存しうる）
+            # Strip any leftover BOM character from the first header cell.
             header = [_strip_bom(col) for col in header]
 
-            # 列名の重複
+            # Detect duplicate column names.
             stripped = [c.strip() for c in header]
             seen: dict[str, int] = {}
             duplicates: list[str] = []
@@ -305,16 +310,17 @@ def _validate_raw_structure(path: Path, encoding: str) -> None:
                     duplicates.append(col)
             if duplicates:
                 raise ValueError(
-                    f"CSVの列名が重複しています: {', '.join(repr(c) for c in duplicates)}. "
-                    "重複列があると対象列を一意に指定できません."
+                    f"CSV has duplicate column names: "
+                    f"{', '.join(repr(c) for c in duplicates)}. "
+                    "With duplicates, the target column cannot be disambiguated."
                 )
 
-            # 列数不整合（先頭10件まで記録して一括エラー化）
+            # Detect rows with a mismatched column count.
             expected = len(header)
             bad_lines: list[int] = []
             line_no = 2
             for row in reader:
-                # 完全に空の行は pandas 側でスキップされるので無視
+                # Fully blank rows are skipped silently by pandas — do the same here.
                 if not row or all(not cell for cell in row):
                     line_no += 1
                     continue
@@ -326,34 +332,34 @@ def _validate_raw_structure(path: Path, encoding: str) -> None:
 
             if bad_lines:
                 lines_repr = ", ".join(str(n) for n in bad_lines)
-                suffix = " (ほか)" if len(bad_lines) == 10 else ""
+                suffix = " (and more)" if len(bad_lines) == 10 else ""
                 raise ValueError(
-                    f"列数が異なる行があります (行番号: {lines_repr}{suffix}). "
-                    f"ヘッダは {expected} 列です. "
-                    "引用符の閉じ忘れや、カンマを含む未クオート文字列が疑われます."
+                    f"Column count mismatch on lines: {lines_repr}{suffix}. "
+                    f"Header has {expected} columns. "
+                    "Likely causes: unclosed quotes, or commas inside unquoted values."
                 )
     except UnicodeDecodeError as exc:
         raise ValueError(
-            f"encoding={encoding} で読み込めませんでした ({path}): {exc}"
+            f"Failed to read with encoding={encoding} ({path}): {exc}"
         ) from exc
 
 
 def _validate_csv_structure(df: pd.DataFrame, path: Path) -> None:
-    """DataFrame 化後の最終チェック."""
+    """Final checks on the DataFrame."""
     if df.empty:
-        raise ValueError(f"CSV にデータ行がありません: {path}")
+        raise ValueError(f"CSV has no data rows: {path}")
 
     columns = df.columns.astype(str).tolist()
     if all(not col.strip() for col in columns):
         raise ValueError(
-            f"CSVにヘッダ行がないようです ({path}). "
-            "1行目を列名として読み込めませんでした."
+            f"CSV has no header row ({path}). "
+            "The first line could not be interpreted as column names."
         )
 
     empty_names = [i for i, col in enumerate(columns) if not col.strip()]
     if empty_names:
         logger.warning(
-            "列名が空の列が %d 件あります (インデックス=%s)",
+            "%d column(s) have empty names (indices=%s)",
             len(empty_names),
             empty_names,
         )
@@ -369,13 +375,13 @@ def _build_multi_column_text(
     cols: list[str],
     labels: dict[str, str],
 ) -> pd.Series:
-    """複数列を `label: value` 形式で結合した正規化済みテキスト列を返す.
+    """Build a `_normalized_text` series by joining multiple columns.
 
-    各行について:
-    - 列ごとに値を取り出し、空ならスキップ
-    - `label: value` 形式にフォーマット
-    - 改行で連結
-    - 最終的に `_normalize_text` で NFKC・空白圧縮を適用
+    For each row:
+      - take each column's value; skip when empty
+      - format as ``label: value``
+      - join with newlines
+      - apply NFKC + whitespace collapse via `_normalize_text`
     """
     def _row_to_text(row: pd.Series) -> str:
         parts: list[str] = []
@@ -393,7 +399,7 @@ def _build_multi_column_text(
 
 
 def _normalize_text(value: object) -> str:
-    """テキストを正規化する."""
+    """Normalise a single text value."""
     if value is None:
         return ""
     text = str(value).strip()
@@ -407,7 +413,7 @@ def _normalize_text(value: object) -> str:
 
 
 def _collapse_duplicates(df: pd.DataFrame) -> pd.DataFrame:
-    """同一 `_normalized_text` を集約し件数を `_duplicate_count` に記録."""
+    """Deduplicate identical `_normalized_text` and keep counts in `_duplicate_count`."""
     counts = df.groupby("_normalized_text").size().rename("_duplicate_count")
     first_occurrence = df.drop_duplicates(subset="_normalized_text", keep="first")
     merged = first_occurrence.merge(
@@ -417,11 +423,13 @@ def _collapse_duplicates(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def _truncate(text: str) -> str:
-    """埋め込みAPI入力長の安全域に収める."""
+    """Truncate to `MAX_TEXT_LENGTH` so the embedding API never rejects the input."""
     if len(text) <= MAX_TEXT_LENGTH:
         return text
     logger.warning(
-        "%d 文字のテキストを %d 文字に切り詰めます", len(text), MAX_TEXT_LENGTH
+        "Truncating %d-character text to %d characters",
+        len(text),
+        MAX_TEXT_LENGTH,
     )
     return text[:MAX_TEXT_LENGTH]
 
@@ -432,13 +440,13 @@ def _truncate(text: str) -> str:
 
 
 def _to_python_codec(encoding: str) -> str:
-    """pandas 用エイリアスを Python 組み込み codec 名に正規化."""
-    # pandas の `utf-8-sig`, `utf-16-le`, `utf-16-be` は Python でも有効
+    """Normalise pandas-style encoding aliases to Python's built-in codec names."""
+    # pandas aliases like `utf-8-sig`, `utf-16-le`, `utf-16-be` are also valid in Python.
     return encoding
 
 
 def _strip_bom(text: str) -> str:
-    """UTF-8 の BOM 文字が文字列先頭に残留していた場合に除去."""
+    """Remove a stray UTF-8 BOM character if it's still on the front of a string."""
     if text.startswith("\ufeff"):
         return text[1:]
     return text
