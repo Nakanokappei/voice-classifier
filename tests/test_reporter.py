@@ -44,8 +44,8 @@ def _make_df_and_summaries() -> tuple[pd.DataFrame, list[ClusterSummary]]:
     return df, summaries
 
 
-def test_write_report_produces_four_files(tmp_path: Path) -> None:
-    """report.md / parameter_search.md / clusters.csv / params.json の4つが生成される."""
+def test_write_report_produces_expected_files(tmp_path: Path) -> None:
+    """report.md / parameter_search.md / clusters.csv / <入力名>_classified.csv / params.json が生成される."""
     df, summaries = _make_df_and_summaries()
     best = _make_best(trials=[
         {"algorithm": "kmeans", "params": {"k": 3}, "silhouette": 0.35, "n_clusters": 3, "n_noise": 0},
@@ -61,8 +61,97 @@ def test_write_report_produces_four_files(tmp_path: Path) -> None:
         text_col="対応内容",
     )
 
-    for name in ("report.md", "parameter_search.md", "clusters.csv", "params.json"):
+    expected = [
+        "report.md",
+        "parameter_search.md",
+        "clusters.csv",
+        "input_classified.csv",  # `input.csv` の stem が input
+        "params.json",
+    ]
+    for name in expected:
         assert (tmp_path / name).exists(), f"{name} が生成されていない"
+
+
+def test_clusters_csv_is_cluster_list(tmp_path: Path) -> None:
+    """clusters.csv はクラスタ1件=1行のサマリ. 元データ行単位ではない."""
+    df, summaries = _make_df_and_summaries()
+    best = _make_best(trials=[
+        {"algorithm": "kmeans", "params": {"k": 3}, "silhouette": 0.35,
+         "n_clusters": 3, "n_noise": 0},
+    ])
+
+    reporter.write_report(
+        output_dir=tmp_path,
+        df=df, labels=best.labels, summaries=summaries, best=best,
+        input_path="/tmp/my_data.csv", text_col="text",
+        cluster_names={0: "Aグループ", 1: "Bグループ", 2: "Cグループ"},
+    )
+
+    import pandas as pd
+    clusters = pd.read_csv(tmp_path / "clusters.csv")
+    # 行数 = クラスタ数
+    assert len(clusters) == 3
+    # 必須列
+    for col in ("cluster_id", "cluster_name", "size", "rep_1"):
+        assert col in clusters.columns
+    # 最大サイズのクラスタが先頭（全てサイズ2なのでIDで確認）
+    assert set(clusters["cluster_id"]) == {0, 1, 2}
+    # 名前が反映されている
+    assert "Aグループ" in clusters["cluster_name"].tolist()
+
+
+def test_classified_csv_name_includes_input_stem(tmp_path: Path) -> None:
+    """classified CSV は <入力ファイル名>_classified.csv の形式."""
+    df, summaries = _make_df_and_summaries()
+    best = _make_best(trials=[
+        {"algorithm": "kmeans", "params": {"k": 3}, "silhouette": 0.35,
+         "n_clusters": 3, "n_noise": 0},
+    ])
+
+    reporter.write_report(
+        output_dir=tmp_path,
+        df=df, labels=best.labels, summaries=summaries, best=best,
+        input_path="/some/path/repair_full.csv", text_col="text",
+    )
+
+    assert (tmp_path / "repair_full_classified.csv").exists()
+    # 行数 = 元データ件数
+    import pandas as pd
+    classified = pd.read_csv(tmp_path / "repair_full_classified.csv")
+    assert len(classified) == len(df)
+    assert "cluster_id" in classified.columns
+
+
+def test_cluster_list_places_noise_at_end(tmp_path: Path) -> None:
+    """clusters.csv はノイズクラスタを末尾に配置する."""
+    import numpy as np
+    df = pd.DataFrame({"_normalized_text": ["a", "b", "c", "d"],
+                       "_duplicate_count": [1, 1, 1, 1]})
+    summaries_with_noise = [
+        ClusterSummary(cluster_id=0, size=2, representative_indices=[0, 1],
+                       representative_texts=["a", "b"]),
+        ClusterSummary(cluster_id=1, size=1, representative_indices=[2],
+                       representative_texts=["c"]),
+        ClusterSummary(cluster_id=-1, size=1,
+                       representative_indices=[], representative_texts=[]),
+    ]
+    best = _make_best(trials=[
+        {"algorithm": "kmeans", "params": {"k": 2}, "silhouette": 0.3,
+         "n_clusters": 2, "n_noise": 1},
+    ])
+    best.labels = np.array([0, 0, 1, -1])
+
+    reporter.write_report(
+        output_dir=tmp_path,
+        df=df, labels=best.labels, summaries=summaries_with_noise, best=best,
+        input_path="/t/data.csv", text_col="text",
+    )
+
+    clusters = pd.read_csv(tmp_path / "clusters.csv")
+    # 最終行がノイズ
+    assert int(clusters.iloc[-1]["cluster_id"]) == -1
+    # ノイズは「未分類」名
+    assert clusters.iloc[-1]["cluster_name"] == "未分類"
 
 
 def test_report_md_excludes_trial_history(tmp_path: Path) -> None:

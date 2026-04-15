@@ -97,7 +97,12 @@ def write_report(
     names = cluster_names or {}
 
     # 常に出力（機械可読）
-    _write_clusters_csv(output_dir / "clusters.csv", df, labels, names)
+    # 元ファイル名をプレフィックスにして <元ファイル名>_classified.csv を生成
+    input_stem = Path(str(input_path)).stem
+    _write_classified_rows_csv(
+        output_dir / f"{input_stem}_classified.csv", df, labels, names
+    )
+    _write_cluster_list_csv(output_dir / "clusters.csv", summaries, names)
     _write_params_json(output_dir / "params.json", best, input_path, text_col, names)
 
     # Markdown 文字列を生成（両形式で共通利用）
@@ -133,19 +138,83 @@ def write_report(
 # ---------------------------------------------------------------------------
 
 
-def _write_clusters_csv(
+def _write_classified_rows_csv(
     path: Path,
     df: pd.DataFrame,
     labels: np.ndarray,
     cluster_names: dict[int, str],
 ) -> None:
-    """入力DataFrameに cluster_id / cluster_name を付けて保存."""
+    """入力DataFrameに cluster_id / cluster_name を付けて保存.
+
+    元ファイル名を手がかりにして `<元ファイル名>_classified.csv` として保存することで、
+    入力ごとに判別しやすくする（`clusters.csv` と混同しにくい命名）.
+    """
     out = df.copy()
     out["cluster_id"] = labels
     if cluster_names:
         out["cluster_name"] = [cluster_names.get(int(cid), "") for cid in labels]
     out.to_csv(path, index=False, encoding="utf-8-sig")
-    logger.debug("clusters.csv 保存: %d 行", len(out))
+    logger.debug("%s 保存: %d 行", path.name, len(out))
+
+
+def _write_cluster_list_csv(
+    path: Path,
+    summaries: list[ClusterSummary],
+    cluster_names: dict[int, str],
+) -> None:
+    """クラスタ1件=1行のサマリ CSV を保存.
+
+    列:
+        cluster_id, cluster_name, size, rep_1, rep_2, ..., rep_N
+
+    ソート規則:
+        1. ノイズ（cluster_id == -1）は末尾
+        2. それ以外はサイズ降順
+    """
+    # 代表テキスト列の幅を揃えるため、最大件数を求める
+    max_reps = max(
+        (len(s.representative_texts) for s in summaries),
+        default=0,
+    )
+
+    # 並び替え: ノイズは末尾、それ以外はサイズ降順
+    non_noise = sorted(
+        [s for s in summaries if s.cluster_id != NOISE_LABEL],
+        key=lambda s: s.size,
+        reverse=True,
+    )
+    noise = [s for s in summaries if s.cluster_id == NOISE_LABEL]
+    ordered = non_noise + noise
+
+    columns = ["cluster_id", "cluster_name", "size"] + [
+        f"rep_{i + 1}" for i in range(max_reps)
+    ]
+
+    rows: list[dict[str, object]] = []
+    for summary in ordered:
+        # ノイズクラスタは代表テキストなし、ラベルは常に「未分類」相当
+        name = cluster_names.get(summary.cluster_id, "")
+        if summary.cluster_id == NOISE_LABEL and not name:
+            name = "未分類"
+
+        row: dict[str, object] = {
+            "cluster_id": int(summary.cluster_id),
+            "cluster_name": name,
+            "size": int(summary.size),
+        }
+        # 代表テキストを rep_1..rep_N に割り当て（足りない列は空文字）
+        for i in range(max_reps):
+            rep = (
+                summary.representative_texts[i]
+                if i < len(summary.representative_texts)
+                else ""
+            )
+            row[f"rep_{i + 1}"] = rep
+        rows.append(row)
+
+    df = pd.DataFrame(rows, columns=columns)
+    df.to_csv(path, index=False, encoding="utf-8-sig")
+    logger.debug("%s 保存: %d クラスタ", path.name, len(df))
 
 
 def _write_params_json(

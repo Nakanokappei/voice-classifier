@@ -239,16 +239,17 @@ def run(args: argparse.Namespace) -> Path:
             output_format=args.output_format,
         )
         # 出力ファイル名を format から決定して表示
+        input_stem = Path(str(args.input)).stem
+        classified_name = f"{input_stem}_classified.csv"
         if args.output_format == "html":
-            artifacts = "report.html / parameter_search.html / clusters.csv / params.json"
+            reports = "report.html / parameter_search.html"
         elif args.output_format == "both":
-            artifacts = (
-                "report.md+html / parameter_search.md+html / "
-                "clusters.csv / params.json"
-            )
+            reports = "report.md+html / parameter_search.md+html"
         else:
-            artifacts = "report.md / parameter_search.md / clusters.csv / params.json"
-        step.set_summary(f"→ {artifacts}")
+            reports = "report.md / parameter_search.md"
+        step.set_summary(
+            f"→ {reports} / clusters.csv / {classified_name} / params.json"
+        )
 
     reporter_ui.footer(str(run_dir))
     logger.info("=== 完了: %s ===", run_dir)

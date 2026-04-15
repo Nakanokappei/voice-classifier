@@ -82,10 +82,11 @@ python src/pipeline.py --input tickets.csv --text-col "対応内容" \
 
 `data/output/YYYYMMDD_HHMMSS/` 配下に以下を生成:
 
-- `report.md` / `report.html`               — クラスタリング結果（採用設定・クラスタ別代表テキスト）
-- `parameter_search.md` / `.html`           — パラメータ探索の全貌（採用/除外理由・全試行ランキング）
-- `clusters.csv`                             — 入力CSV + `cluster_id`（`--name-clusters` 時は `cluster_name` も）
-- `params.json`                              — 採用アルゴリズム・パラメータ・スコア・探索メタ情報
+- `report.md` / `report.html`           — クラスタリング結果（採用設定・クラスタ別代表テキスト）
+- `parameter_search.md` / `.html`       — パラメータ探索の全貌（採用/除外理由・全試行ランキング）
+- `clusters.csv`                         — **クラスタのリスト** (1行=1クラスタ): id, name, size, rep_1..N
+- `<入力ファイル名>_classified.csv`       — 元データ全行に `cluster_id` / `cluster_name` を付加
+- `params.json`                          — 採用アルゴリズム・パラメータ・スコア・探索メタ情報
 
 `--format md`（既定）では Markdown のみ、`--format html` では HTML のみ、`--format both` で両方.
 
