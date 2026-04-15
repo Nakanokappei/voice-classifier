@@ -152,16 +152,46 @@ class ColumnCandidate:
 
     @property
     def score(self) -> float:
-        """Likelihood of being a text column.
+        """Likelihood of being a useful text column for clustering.
 
-        Longer average length, high non-empty rate, and high uniqueness push the
-        score up. Categorical columns (e.g. "return"/"delivery" repeated) end up
-        low.
+        Scoring factors:
+
+        - Length: longer content generally carries more signal.
+        - Non-empty ratio: mostly-populated columns beat sparse ones.
+        - Diversity: very short tail of distinct values (unique_ratio near 0)
+          is mildly penalised — but we do *not* punish categorical columns
+          hard, because they're often the most informative for clustering
+          (e.g. "Ticket Subject" with a handful of values per ticket type).
+        - ID-ness: columns where nearly every row has a unique value
+          (unique_ratio ≥ 0.9) look like identifiers / emails / names.
+          They rarely help clustering and often leak PII, so we apply a
+          strong penalty.
         """
-        return self.avg_length * self.non_empty_ratio * (0.5 + 0.5 * self.unique_ratio)
+        diversity = 0.5 + 0.5 * self.unique_ratio
+        id_like_penalty = _id_likeness_penalty(self.unique_ratio)
+        return (
+            self.avg_length
+            * self.non_empty_ratio
+            * diversity
+            * id_like_penalty
+        )
 
 
-def suggest_text_columns(path: Path | str, top_k: int = 5) -> list[ColumnCandidate]:
+def _id_likeness_penalty(unique_ratio: float) -> float:
+    """Multiplier that pushes "ID-like" columns down the ranking.
+
+    Columns where nearly every row has a different value are almost always
+    identifiers, timestamps, or PII (email, full name). They are rarely the
+    right target for clustering.
+    """
+    if unique_ratio >= 0.90:
+        return 0.30
+    if unique_ratio >= 0.80:
+        return 0.60
+    return 1.0
+
+
+def suggest_text_columns(path: Path | str, top_k: int = 10) -> list[ColumnCandidate]:
     """Score every non-numeric column and return the best candidates in order.
 
     Filter rule:
