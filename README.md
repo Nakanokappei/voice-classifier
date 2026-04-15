@@ -9,7 +9,7 @@ and an insight report.
 ## Features
 
 - **Embeddings**: OpenAI `text-embedding-3-small` by default, with a local cache.
-- **Auto-tuning**: sweeps KMeans / DBSCAN / HDBSCAN and picks the best config
+- **Auto-tuning**: sweeps KMeans / HDBSCAN / Leiden and picks the best config
   by cosine silhouette.
 - **Representative text**: LLM summary of each cluster plus the raw
   near-centroid rows for verification.

@@ -206,7 +206,7 @@ def run(args: argparse.Namespace) -> Path:
     # Step 3: Clustering sweep and selection.
     with reporter_ui.step("Search clustering candidates") as step:
         step.detail(
-            f"KMeans/DBSCAN/HDBSCAN sweep on {tuner.SWEEP_SAMPLE_SIZE} samples"
+            f"KMeans/HDBSCAN/Leiden sweep on {tuner.SWEEP_SAMPLE_SIZE} samples"
         )
         best = tuner.find_best_clustering(
             embeddings,

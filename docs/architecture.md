@@ -41,8 +41,8 @@
 ### `tuner.py`
 - Enumerate candidate methods and parameters:
     - KMeans: `k ∈ [min_k, max_k]`
-    - DBSCAN: grid over `eps`, `min_samples = max(3, ⌈ln N⌉)`
     - HDBSCAN: sweep over `min_cluster_size`
+    - Leiden: HNSW k-NN graph + community detection over a `resolution` grid
 - Score each candidate with cosine silhouette.
 - Return a `BestConfig(algorithm, params, score, labels)`.
 - See [`algorithm.md`](algorithm.md).
@@ -79,7 +79,7 @@
 # tuner.py
 @dataclass
 class BestConfig:
-    algorithm: Literal["kmeans", "dbscan", "hdbscan"]
+    algorithm: Literal["kmeans", "hdbscan", "leiden"]
     params: dict[str, Any]
     silhouette: float
     labels: np.ndarray  # shape (N,)

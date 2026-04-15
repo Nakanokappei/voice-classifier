@@ -57,21 +57,29 @@ when the sample doesn't span the full manifold, so we refit instead.
 | Method | Traits | Key parameters |
 |---|---|---|
 | **MiniBatchKMeans** | Partitions into K clusters; no noise; fast batches | `k` |
-| **DBSCAN** | Density-based; produces noise; `eps` defines density | `eps`, `min_samples=5` |
-| **HDBSCAN** | Hierarchical density-based; automatic K | `min_cluster_size`, `min_samples=5` |
+| **HDBSCAN** | Hierarchical density-based; automatic K; handles variable-density clusters | `min_cluster_size`, `min_samples=5` |
+| **Leiden** | Graph-based community detection on an HNSW k-NN graph; no noise; excels on high-dim text embeddings (BERTopic-style) | `resolution`, `n_neighbors=15` |
 
-HDBSCAN requires `pip install hdbscan`; when absent it is automatically skipped.
+DBSCAN is intentionally omitted: its single `eps` assumption performs poorly
+on text embeddings where cluster densities vary widely (frequent topics are
+dense, niche ones are sparse). HDBSCAN dominates on every realistic
+text-clustering benchmark we've run, so it replaces DBSCAN entirely.
+
+HDBSCAN requires `pip install hdbscan`; Leiden needs `hnswlib + python-igraph
++ leidenalg`. When any of these is missing, that algorithm is skipped
+automatically without failing the rest of the pipeline.
 
 ### Parameter grids
 
 ```
-K (KMeans):          [2, 3, 5, 7, 10, 15, 20, 30, 50, 80]
-eps (DBSCAN):        [0.25, 0.35, 0.45, 0.55, 0.70]   # scale: L2-normalised euclidean
+K (KMeans):                 [2, 3, 5, 7, 10, 15, 20, 30, 50, 80]
 min_cluster_size (HDBSCAN): [5, 10, 15, 20, 30, 50, 80, 100]
+resolution (Leiden):        [0.3, 0.5, 0.7, 1.0, 1.3, 1.7]   # higher → more communities
 ```
 
 Same discrete human-readable grids as CKPS. A log-scaled sweep adds little
-signal for these metrics.
+signal for these metrics. The Leiden sweep builds its HNSW graph once per
+invocation and reuses it across resolutions, so the full grid is cheap.
 
 ---
 

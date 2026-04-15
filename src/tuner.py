@@ -20,7 +20,7 @@ from dataclasses import dataclass, field
 from typing import Any, Callable, Literal
 
 import numpy as np
-from sklearn.cluster import DBSCAN, MiniBatchKMeans
+from sklearn.cluster import MiniBatchKMeans
 from sklearn.decomposition import PCA
 from sklearn.metrics import silhouette_score
 from tqdm import tqdm
@@ -38,8 +38,23 @@ except ImportError:  # pragma: no cover
     _HDBSCAN_AVAILABLE = False
     logger.info("hdbscan is not installed; HDBSCAN candidates will be skipped")
 
+# Leiden requires three packages; each is optional.  Missing any of them
+# disables the leiden sweep without failing the rest of the pipeline.
+try:  # pragma: no cover - environment-dependent
+    import hnswlib  # type: ignore[import-not-found]
+    import igraph as _ig  # type: ignore[import-not-found]
+    import leidenalg as _la  # type: ignore[import-not-found]
 
-Algorithm = Literal["kmeans", "dbscan", "hdbscan"]
+    _LEIDEN_AVAILABLE = True
+except ImportError:  # pragma: no cover
+    _LEIDEN_AVAILABLE = False
+    logger.info(
+        "hnswlib / python-igraph / leidenalg not installed; "
+        "Leiden candidates will be skipped"
+    )
+
+
+Algorithm = Literal["kmeans", "hdbscan", "leiden"]
 
 # Sample size for the sweep. 1,500 is the practical ceiling for O(n²) cosine silhouette.
 SWEEP_SAMPLE_SIZE: int = 1500
@@ -59,10 +74,15 @@ K_CANDIDATES: tuple[int, ...] = (2, 3, 5, 7, 10, 15, 20, 30, 50, 80)
 HDBSCAN_MCS_CANDIDATES: tuple[int, ...] = (5, 10, 15, 20, 30, 50, 80, 100)
 HDBSCAN_MIN_SAMPLES: int = 5
 
-# DBSCAN ``eps`` grid on the L2-normalised euclidean scale.
-# After normalisation: euclidean² = 2 * (1 - cos_sim). Example: cos_sim=0.75 -> eps ≈ 0.707.
-DBSCAN_EPS_GRID: tuple[float, ...] = (0.25, 0.35, 0.45, 0.55, 0.70)
-DBSCAN_MIN_SAMPLES: int = 5
+# Leiden community detection on an HNSW k-NN graph (inspired by BERTopic /
+# CKPS). Resolution controls the granularity: lower resolution = fewer, larger
+# communities; higher resolution = more, smaller communities.
+LEIDEN_RESOLUTION_GRID: tuple[float, ...] = (0.3, 0.5, 0.7, 1.0, 1.3, 1.7)
+# k-NN neighbours per node in the HNSW graph.  The default of 15 tracks CKPS.
+LEIDEN_DEFAULT_NEIGHBOURS: int = 15
+# HNSW index construction parameters.  These rarely need tuning.
+LEIDEN_HNSW_EF_CONSTRUCTION: int = 200
+LEIDEN_HNSW_M: int = 16
 
 # Usability filter: drop candidates whose noise ratio exceeds this threshold.
 # A high score on "6 tiny clusters carved out of 1,500 points with 97% noise"
@@ -211,12 +231,13 @@ def find_best_clustering(
 def _run_all_sweeps(
     sample: np.ndarray, min_clusters: int, max_clusters: int
 ) -> list[dict[str, Any]]:
-    """Run KMeans / DBSCAN / (optional) HDBSCAN sweeps, returning one flat trial list."""
+    """Run every available sweep, returning one flat trial list."""
     trials: list[dict[str, Any]] = []
     trials.extend(_sweep_kmeans(sample, min_clusters, max_clusters))
-    trials.extend(_sweep_dbscan(sample))
     if _HDBSCAN_AVAILABLE:
         trials.extend(_sweep_hdbscan(sample))
+    if _LEIDEN_AVAILABLE:
+        trials.extend(_sweep_leiden(sample))
     return trials
 
 
@@ -324,27 +345,32 @@ def _sweep_kmeans(
     )
 
 
-def _sweep_dbscan(sample: np.ndarray) -> list[dict[str, Any]]:
-    """Sweep DBSCAN over the ``eps`` grid."""
+def _sweep_leiden(sample: np.ndarray) -> list[dict[str, Any]]:
+    """Sweep Leiden community detection over the resolution grid.
 
-    def _build(eps: float) -> DBSCAN:
-        return DBSCAN(
-            eps=float(eps),
-            min_samples=DBSCAN_MIN_SAMPLES,
-            # Euclidean is fine because the input is already L2-normalised.
-            metric="euclidean",
-            n_jobs=-1,
+    A single HNSW k-NN graph is built once for the sample, then Leiden is run
+    at each resolution.  The graph-construction cost is amortised across the
+    whole sweep; only the Leiden partition is re-computed per resolution.
+    """
+    n = sample.shape[0]
+    # Guard against pathological cases where the sample is smaller than k.
+    n_neighbors = min(LEIDEN_DEFAULT_NEIGHBOURS, max(2, n - 1))
+    graph = _build_knn_graph(sample, n_neighbors=n_neighbors)
+
+    trials: list[dict[str, Any]] = []
+    for resolution in tqdm(
+        LEIDEN_RESOLUTION_GRID, desc="Leiden sweep", unit="res", leave=False
+    ):
+        labels = _leiden_partition(graph, resolution=float(resolution))
+        trials.append(
+            _build_trial(
+                algorithm="leiden",
+                params={"resolution": float(resolution), "n_neighbors": n_neighbors},
+                labels=labels,
+                sample=sample,
+            )
         )
-
-    return _run_sweep(
-        sample=sample,
-        algorithm="dbscan",
-        candidates=list(DBSCAN_EPS_GRID),
-        build_model=_build,
-        params_of=lambda eps: {"eps": float(eps), "min_samples": DBSCAN_MIN_SAMPLES},
-        desc="DBSCAN sweep",
-        unit="eps",
-    )
+    return trials
 
 
 def _sweep_hdbscan(sample: np.ndarray) -> list[dict[str, Any]]:
@@ -411,15 +437,14 @@ def _fit_winner_on_full_data(
         model.fit(normalized)
         return model.predict(normalized).astype(np.int64)
 
-    if algorithm == "dbscan":
-        model = DBSCAN(
-            eps=float(params["eps"]),
-            min_samples=int(params["min_samples"]),
-            metric="euclidean",
-            algorithm="ball_tree",
-            n_jobs=-1,
-        )
-        return model.fit_predict(normalized).astype(np.int64)
+    if algorithm == "leiden":
+        # Rebuild the k-NN graph on the full data and re-run Leiden at the
+        # winning resolution.  HNSW keeps this O(N log N) instead of O(N²).
+        n_neighbors = int(params.get("n_neighbors", LEIDEN_DEFAULT_NEIGHBOURS))
+        # For very small datasets, clamp k so hnswlib has something to build.
+        n_neighbors = min(n_neighbors, max(2, normalized.shape[0] - 1))
+        graph = _build_knn_graph(normalized, n_neighbors=n_neighbors)
+        return _leiden_partition(graph, resolution=float(params["resolution"]))
 
     # hdbscan
     model = hdbscan.HDBSCAN(
@@ -429,6 +454,82 @@ def _fit_winner_on_full_data(
         core_dist_n_jobs=-1,
     )
     return model.fit_predict(normalized).astype(np.int64)
+
+
+# ---------------------------------------------------------------------------
+# Leiden helpers (HNSW k-NN graph + Leiden community detection)
+# ---------------------------------------------------------------------------
+
+
+def _build_knn_graph(
+    vectors: np.ndarray,
+    n_neighbors: int,
+) -> "_ig.Graph":
+    """Build an HNSW k-NN graph with cosine similarity edge weights.
+
+    Steps:
+      1. Index the vectors in an HNSW graph (`space="cosine"`).
+      2. Query the k nearest neighbours for each point.
+      3. Turn the result into an igraph weighted graph whose edge weights
+         are cosine similarities in ``[0, 1]``.
+
+    The returned graph feeds directly into ``_leiden_partition``.
+    """
+    n_points, dim = vectors.shape
+
+    # HNSW index (approximate k-NN, O(N log N)).
+    index = hnswlib.Index(space="cosine", dim=dim)
+    index.init_index(
+        max_elements=n_points,
+        ef_construction=LEIDEN_HNSW_EF_CONSTRUCTION,
+        M=LEIDEN_HNSW_M,
+    )
+    # hnswlib needs a float32 contiguous array.
+    index.add_items(
+        np.ascontiguousarray(vectors, dtype=np.float32),
+        np.arange(n_points),
+    )
+    # Set query-time ef; 2x k (clamped to a floor) is a solid default.
+    index.set_ef(max(n_neighbors * 2, 50))
+
+    neighbour_indices, neighbour_distances = index.knn_query(
+        np.ascontiguousarray(vectors, dtype=np.float32),
+        k=n_neighbors,
+    )
+
+    # Build the edge list. hnswlib returns cosine *distance* in [0, 2];
+    # convert to cosine *similarity* in [0, 1] for the edge weights.
+    edges: list[tuple[int, int]] = []
+    weights: list[float] = []
+    for i in range(n_points):
+        for j_idx in range(n_neighbors):
+            j = int(neighbour_indices[i][j_idx])
+            if i == j:
+                # Skip the self-loop that hnswlib always returns.
+                continue
+            similarity = max(1.0 - float(neighbour_distances[i][j_idx]), 0.0)
+            edges.append((i, j))
+            weights.append(similarity)
+
+    graph = _ig.Graph(n=n_points, edges=edges, directed=False)
+    graph.es["weight"] = weights
+    # Collapse duplicate edges (the graph is undirected but hnswlib may
+    # report i→j and j→i separately); keep the stronger weight.
+    graph.simplify(combine_edges="max")
+    return graph
+
+
+def _leiden_partition(
+    graph: "_ig.Graph", resolution: float
+) -> np.ndarray:
+    """Run Leiden community detection and return a numpy label array."""
+    partition = _la.find_partition(
+        graph,
+        _la.RBConfigurationVertexPartition,
+        weights="weight",
+        resolution_parameter=resolution,
+    )
+    return np.array(partition.membership, dtype=np.int64)
 
 
 # ---------------------------------------------------------------------------

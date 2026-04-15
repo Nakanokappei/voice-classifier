@@ -10,6 +10,12 @@ numpy>=1.26.0
 scikit-learn>=1.4.0
 hdbscan>=0.8.33
 
+# Graph-based clustering (HNSW k-NN graph + Leiden community detection).
+# All three are optional: the tuner falls back gracefully when any are missing.
+hnswlib>=0.8.0
+python-igraph>=0.11.0
+leidenalg>=0.10.0
+
 # UX
 tqdm>=4.66.0
 

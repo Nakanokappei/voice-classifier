@@ -81,3 +81,23 @@ def test_all_trials_are_recorded() -> None:
     # KMeans alone should try multiple K values
     kmeans_trials = [t for t in best.all_trials if t["algorithm"] == "kmeans"]
     assert len(kmeans_trials) >= 2
+
+
+def test_leiden_sweep_runs_when_available() -> None:
+    """When the Leiden backend is installed, it produces trials across the grid."""
+    if not tuner._LEIDEN_AVAILABLE:
+        import pytest
+
+        pytest.skip("Leiden backend not installed")
+    X = _synthetic_blobs(
+        [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]],
+        per_cluster=30,
+    )
+    best = tuner.find_best_clustering(X, min_clusters=2, max_clusters=10)
+
+    leiden_trials = [t for t in best.all_trials if t["algorithm"] == "leiden"]
+    # Every resolution in the grid should have produced a trial.
+    assert len(leiden_trials) == len(tuner.LEIDEN_RESOLUTION_GRID)
+    # Clear cluster structure should yield at least two valid clusters for
+    # at least one resolution.
+    assert any(t["n_clusters"] >= 2 for t in leiden_trials)

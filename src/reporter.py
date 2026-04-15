@@ -548,7 +548,7 @@ def _build_parameter_search_md(
     # Per-method digest.
     lines.append("## Score Progression by Method")
     lines.append("")
-    for algo in ("kmeans", "dbscan", "hdbscan"):
+    for algo in ("kmeans", "hdbscan", "leiden"):
         algo_trials = [t for t in best.all_trials if t["algorithm"] == algo]
         if not algo_trials:
             continue
@@ -818,7 +818,7 @@ def _build_parameter_search_chart_svg(best: BestConfig) -> str:
     # X-axis labels rotated 45° so they don't overlap.
     for rank, trial in enumerate(valid, start=1):
         x_center = margin_l + bar_slot * (rank - 0.5)
-        algo_short = {"kmeans": "KM", "dbscan": "DB", "hdbscan": "HD"}.get(
+        algo_short = {"kmeans": "KM", "hdbscan": "HD", "leiden": "LD"}.get(
             trial["algorithm"], trial["algorithm"][:2]
         )
         param_label = _compact_param_label(trial["params"])
@@ -853,10 +853,10 @@ def _compact_param_label(params: dict[str, Any]) -> str:
     """Short parameter label for axis tick text."""
     if "k" in params:
         return f"k={params['k']}"
-    if "eps" in params:
-        return f"eps={params['eps']:.2f}"
     if "min_cluster_size" in params:
         return f"mcs={params['min_cluster_size']}"
+    if "resolution" in params:
+        return f"res={params['resolution']:.1f}"
     first_key = next(iter(params))
     return f"{first_key}={params[first_key]}"
 
