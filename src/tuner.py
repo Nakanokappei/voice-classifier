@@ -394,9 +394,22 @@ def _apply_to_full(
 
 
 def _l2_normalize(x: np.ndarray) -> np.ndarray:
-    """行ごとに L2 正規化. ゼロベクトルはそのまま."""
+    """行ごとに L2 正規化. ゼロ行は正準基底ベクトル `e_0` に置換.
+
+    素のゼロ行を残すと、下流で `X / ||X||` 形の計算を行う sklearn の
+    silhouette_score / cosine_distances などが divide-by-zero を踏む.
+    決定的な単位ベクトルに置換することで、意味のある距離計算は維持しつつ
+    警告を根絶する（置換された行同士は cosine_sim=1 でまとまる）.
+    """
     norms = np.linalg.norm(x, axis=1, keepdims=True)
-    norms = np.where(norms == 0, 1.0, norms)
+    zero_mask = norms.flatten() == 0
+    if zero_mask.any():
+        logger.warning(
+            "ゼロノルム行を %d 件検出. 正準基底 e_0 に置換します", int(zero_mask.sum())
+        )
+        x = x.copy()
+        x[zero_mask, 0] = 1.0
+        norms = np.linalg.norm(x, axis=1, keepdims=True)
     return x / norms
 
 

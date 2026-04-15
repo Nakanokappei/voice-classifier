@@ -10,10 +10,30 @@ from __future__ import annotations
 import argparse
 import logging
 import sys
+import warnings
 from datetime import datetime
 from pathlib import Path
 
 from dotenv import load_dotenv
+
+
+def _suppress_known_benign_warnings() -> None:
+    """sklearn 内部で発生する既知良性 RuntimeWarning を抑制する.
+
+    - sklearn.utils.extmath (safe_sparse_dot) の divide/overflow/invalid
+      は randomized SVD や cosine_distances 正規化で発生する数値ノイズで、
+      voice-classifier の演算結果には影響しない
+    - ゼロノルム行は上流で e_0 に置換済みなので意味的な警告は残らない
+    """
+    warnings.filterwarnings(
+        "ignore",
+        category=RuntimeWarning,
+        message=r".*(divide by zero|overflow|invalid value).*matmul.*",
+    )
+    # PCA の randomized SVD 内部の類似警告も同メッセージなので上記で拾える
+
+
+_suppress_known_benign_warnings()
 
 # モジュールとして（`python -m src.pipeline`）、またはスクリプトとして（`python src/pipeline.py`）
 # どちらでも動くように import 経路を両対応

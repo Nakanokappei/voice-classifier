@@ -109,9 +109,18 @@ def summarize_clusters(
 
 
 def _l2_normalize(x: np.ndarray) -> np.ndarray:
-    """行ごとに L2 正規化."""
+    """行ごとに L2 正規化. ゼロ行は正準基底 `e_0` に置換.
+
+    tuner._l2_normalize と同一仕様（責務分離のため各モジュールに配置）.
+    下流の `member_vectors @ centroid` で divide-by-zero を踏まないよう、
+    ゼロノルムを根絶する.
+    """
     norms = np.linalg.norm(x, axis=1, keepdims=True)
-    norms = np.where(norms == 0, 1.0, norms)
+    zero_mask = norms.flatten() == 0
+    if zero_mask.any():
+        x = x.copy()
+        x[zero_mask, 0] = 1.0
+        norms = np.linalg.norm(x, axis=1, keepdims=True)
     return x / norms
 
 
@@ -135,7 +144,14 @@ def _pick_representatives(
         return member_indices[:top_k].tolist()
     centroid /= centroid_norm
 
-    similarities = member_vectors @ centroid  # cosine 類似度
-    # 降順にソートして上位 top_k
+    # member_vectors は _l2_normalize 済みなのでゼロ行は存在しない前提.
+    # ただし数値精度で微小なオーバーフロー等が起きうるため防御的に errstate で抑制
+    with np.errstate(divide="ignore", invalid="ignore", over="ignore"):
+        similarities = member_vectors @ centroid
+
+    # NaN/Inf が万一混入しても最下位に送る
+    similarities = np.nan_to_num(
+        similarities, nan=-np.inf, posinf=np.inf, neginf=-np.inf
+    )
     order = np.argsort(-similarities)[:top_k]
     return [int(member_indices[i]) for i in order]
