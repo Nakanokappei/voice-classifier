@@ -125,8 +125,11 @@ data/output/20260416_012345/
 | `--top-k N` | `5` | จำนวนตัวแทนต่อกลุ่ม |
 | `--min-clusters N` | `2` | ขอบล่างของ K |
 | `--max-clusters N` | `20` | ขอบบนของ K |
+| `--target faq|chatbot|insight` | `faq` | ความละเอียดตามการใช้งาน. `faq`=30-80 กลุ่ม (หน้า FAQ), `chatbot`=50-150 (intent), `insight`=silhouette สูงสุด |
 | `--name-clusters` / `--no-name-clusters` | เปิด | เปิด/ปิดการติดป้ายกำกับด้วย LLM |
 | `--name-model NAME` | `gpt-5.4-nano` | โมเดล chat สำหรับติดป้าย |
+| `--advise` / `--no-advise` | on | คำแนะนำ LLM ที่ด้านบนของ `parameter_search.html` |
+| `--advisor-model NAME` | `gpt-5.4` | โมเดลแชทสำหรับคำแนะนำ (วิเคราะห์ทั้ง run) |
 | `--format md|html|both` | `md` | รูปแบบของ `report.*` |
 | `--log-level LEVEL` | `INFO` | ระดับรายละเอียดใน stderr |
 

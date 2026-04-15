@@ -28,6 +28,7 @@ tests/
 ├── test_tuner.py            Synthetic blobs; algorithm selection; Leiden skip-guard
 ├── test_clusterer.py        Centroid-nearest picks; noise handling; length mismatch
 ├── test_namer.py            Mocked Chat API; label+summary shape, dedup, API-spec adapter
+├── test_advisor.py          Mocked Chat API; digest construction, fence stripping, retry fallback
 └── test_reporter.py         File shape checks; summary injection; HTML/MD/both toggle
 ```
 

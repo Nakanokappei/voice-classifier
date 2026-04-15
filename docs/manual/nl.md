@@ -127,8 +127,11 @@ data/output/20260416_012345/
 | `--top-k N` | `5` | Representanten per cluster |
 | `--min-clusters N` | `2` | Ondergrens voor K |
 | `--max-clusters N` | `20` | Bovengrens voor K |
+| `--target faq|chatbot|insight` | `faq` | Granulariteit per use case. `faq`=30-80 clusters (FAQ), `chatbot`=50-150 (intents), `insight`=maximale silhouette |
 | `--name-clusters` / `--no-name-clusters` | aan | LLM-labelling aan/uit |
 | `--name-model NAME` | `gpt-5.4-nano` | Chat-model voor labelling |
+| `--advise` / `--no-advise` | on | LLM-adviesnotitie boven in `parameter_search.html` |
+| `--advisor-model NAME` | `gpt-5.4` | Chat-model voor de adviesnotitie (beschouwt de hele run) |
 | `--format md|html|both` | `md` | Formaat van `report.*` |
 | `--log-level LEVEL` | `INFO` | Verbositeit op stderr |
 

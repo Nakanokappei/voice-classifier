@@ -12,14 +12,15 @@
                         │ reporter │ ◀────────────────────── │ clusterer │
                         └────┬─────┘                         └───────────┘
                              │              (optional)             ▲
-                             │                     ┌──────────────┘
-                             ▼                     │ annotations
-                 data/output/YYYYMMDD_HHMMSS/     ┌┴───────┐
-                 ├─ report.md / report.html      │ namer  │
-                 ├─ parameter_search.html        └────────┘  (LLM labels & summaries)
-                 ├─ clusters.csv
-                 ├─ <input>_classified.csv
-                 └─ params.json
+                             │              ┌──────────────────────┤
+                             ▼              │ annotations          │
+                 data/output/YYYYMMDD_HHMMSS/├─ annotations ┌──────┴───┐
+                 ├─ report.md / report.html │              │ advisor  │
+                 ├─ parameter_search.html   ┌┴───────┐      └────┬─────┘
+                 ├─ clusters.csv            │ namer  │        (LLM verdict
+                 ├─ <input>_classified.csv  └────────┘         injected into
+                 └─ params.json           (LLM labels &        parameter_
+                                          summaries)          search.html)
 ```
 
 `pipeline.py` is the only entrypoint; it calls each module in order.
@@ -58,10 +59,24 @@
 - Generate label + summary per cluster in parallel, grounded on the context.
 - Resolve duplicate labels by differentiating the smaller clusters.
 
+### `advisor.py` (optional)
+- Builds a compact `RunDigest` from the selected configuration, coverage
+  stats (top-N cumulative share), top cluster labels, dataset domain, and
+  whether dedup converged.
+- Calls a stronger chat model (default `gpt-5.4`) to produce a Markdown
+  advisory with four sections: Verdict, How to use these clusters, Caveats,
+  Recommended next steps.
+- Reasons over the entire run, not a single cluster — which is why this
+  module is separate from `namer.py` and uses a larger model.
+- Failure is non-fatal; when the API call fails, an empty string is
+  returned and the rest of the report is still written.
+
 ### `reporter.py`
 - `report.md` / `report.html`: clustering outcome with the LLM summary (or a
   placeholder) plus the raw near-centroid items.
-- `parameter_search.html`: full search report with a dual-axis SVG chart.
+- `parameter_search.html`: full search report with a dual-axis SVG chart
+  and a Pareto coverage curve. When the advisor ran, its Markdown verdict
+  is inserted as an `.advisory` section immediately below the chart.
 - `clusters.csv`: one row per cluster — `cluster_id, cluster_name, size,
   summary, rep_1..N`.
 - `<input>_classified.csv`: original data plus `cluster_id` / `cluster_name`.
@@ -70,7 +85,7 @@
 ### `pipeline.py`
 - Parse CLI arguments.
 - Create a timestamped output directory.
-- Run `loader → embedder → tuner → clusterer → (namer) → reporter`.
+- Run `loader → embedder → tuner → clusterer → (namer) → (advisor) → reporter`.
 - Log to stderr and `output_dir/run.log` (INFO+ always captured).
 
 ## Types and Interfaces
@@ -99,6 +114,25 @@ class ClusterSummary:
 class ClusterAnnotation:
     label: str
     summary: str
+
+# advisor.py
+@dataclass
+class RunDigest:
+    target: str                                  # faq / chatbot / insight
+    algorithm: str
+    params_text: str
+    silhouette: float
+    n_clusters: int
+    n_noise: int
+    total_rows: int
+    noise_ratio_pct: float
+    max_share_pct: float
+    coverage_top_n: list[tuple[int, float]]      # (N, cum% of total)
+    coverage_top_n_ex_noise: list[tuple[int, float]]
+    top_cluster_labels: list[tuple[str, int]]
+    dataset_domain: str
+    dataset_hint: str
+    dedup_converged: bool
 ```
 
 ## I/O Contract

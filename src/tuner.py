@@ -389,16 +389,18 @@ def _target_score(
 
 
 def _max_cluster_share(trial: dict[str, Any], sample_size: int) -> float:
-    """Share of the largest non-noise cluster in the sample."""
-    labels = trial.get("sample_labels")
-    if labels is None or sample_size <= 0:
-        return 0.0
-    from collections import Counter
+    """Share of the largest non-noise cluster in the sample.
 
-    counts = Counter(int(label) for label in labels if int(label) != -1)
-    if not counts:
+    Prefers the precomputed ``max_cluster_share`` in the trial dict when
+    available (added by ``_build_trial``); falls back to counting labels.
+    """
+    cached = trial.get("max_cluster_share")
+    if cached is not None:
+        return float(cached)
+    labels = trial.get("sample_labels")
+    if labels is None:
         return 0.0
-    return max(counts.values()) / sample_size
+    return _max_cluster_share_from_labels(labels, sample_size)
 
 
 def _granularity_fit(n_clusters: int, target: Target) -> float:
@@ -474,6 +476,7 @@ def _build_trial(
 ) -> dict[str, Any]:
     """Assemble the standard trial dict consumed by the selector and reporter."""
     n_clusters, n_noise = _count_clusters(labels)
+    max_share = _max_cluster_share_from_labels(labels, sample.shape[0])
     return {
         "algorithm": algorithm,
         "params": params,
@@ -481,7 +484,22 @@ def _build_trial(
         "silhouette": _silhouette_on_sample(sample, labels),
         "n_clusters": n_clusters,
         "n_noise": n_noise,
+        "max_cluster_share": max_share,
     }
+
+
+def _max_cluster_share_from_labels(
+    labels: np.ndarray, sample_size: int
+) -> float:
+    """Share of the largest non-noise cluster in the label array."""
+    if sample_size <= 0:
+        return 0.0
+    from collections import Counter
+
+    counts = Counter(int(label) for label in labels if int(label) != -1)
+    if not counts:
+        return 0.0
+    return max(counts.values()) / sample_size
 
 
 def _sweep_kmeans(
@@ -787,11 +805,27 @@ def _count_clusters(labels: np.ndarray) -> tuple[int, int]:
 
 
 def _trial_log(trial: dict[str, Any]) -> dict[str, Any]:
-    """Compact dict suitable for ``all_trials`` (drops heavy fields like sample_labels)."""
+    """Compact dict suitable for ``all_trials`` (drops heavy fields like sample_labels).
+
+    Keeps ``max_cluster_share`` so the reporter can compute per-target scores
+    without needing the raw label array.
+    """
     return {
         "algorithm": trial["algorithm"],
         "params": trial["params"],
         "silhouette": trial["silhouette"],
         "n_clusters": int(trial["n_clusters"]),
         "n_noise": int(trial["n_noise"]),
+        "max_cluster_share": float(trial.get("max_cluster_share", 0.0)),
     }
+
+
+def score_trial_under_target(
+    trial: dict[str, Any], sample_size: int, target: Target
+) -> float:
+    """Public wrapper: compute the target-aware score for an archived trial.
+
+    Reporter code calls this to surface "what score would this candidate have
+    earned under each target mode?" without re-running the sweep.
+    """
+    return _target_score(trial, sample_size=sample_size, target=target)

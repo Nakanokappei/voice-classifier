@@ -126,8 +126,11 @@ data/output/20260416_012345/
 | `--top-k N` | `5` | Сколько представителей на кластер |
 | `--min-clusters N` | `2` | Нижний предел K |
 | `--max-clusters N` | `20` | Верхний предел K |
+| `--target faq|chatbot|insight` | `faq` | Гранулярность по цели. `faq`=30-80 кластеров (FAQ), `chatbot`=50-150 (интенты), `insight`=максимум silhouette |
 | `--name-clusters` / `--no-name-clusters` | вкл. | Разметка LLM вкл/выкл |
 | `--name-model NAME` | `gpt-5.4-nano` | Чат-модель для разметки |
+| `--advise` / `--no-advise` | on | Советующее примечание LLM в начале `parameter_search.html` |
+| `--advisor-model NAME` | `gpt-5.4` | Чат-модель для советующего примечания (анализирует весь прогон) |
 | `--format md|html|both` | `md` | Формат `report.*` |
 | `--log-level LEVEL` | `INFO` | Подробность stderr |
 

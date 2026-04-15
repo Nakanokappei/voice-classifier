@@ -40,9 +40,9 @@ _suppress_known_benign_warnings()
 # module (`python -m src.pipeline`).
 if __package__ in (None, ""):  # pragma: no cover
     sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-    from src import clusterer, embedder, loader, namer, progress, reporter, tuner
+    from src import advisor, clusterer, embedder, loader, namer, progress, reporter, tuner
 else:
-    from . import clusterer, embedder, loader, namer, progress, reporter, tuner
+    from . import advisor, clusterer, embedder, loader, namer, progress, reporter, tuner
 
 
 logger = logging.getLogger("voice_classifier")
@@ -152,6 +152,29 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="Report format for report.md/html. Default md.",
     )
     parser.add_argument(
+        "--advise",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help=(
+            "Generate an LLM advisory note (default: on) summarising what "
+            "the chosen configuration means for downstream use. It is "
+            "inserted at the top of `parameter_search.html`. Requires "
+            "--name-clusters (the advisor cites cluster labels). Disable "
+            "with --no-advise to skip one extra LLM call."
+        ),
+    )
+    parser.add_argument(
+        "--advisor-model",
+        dest="advisor_model",
+        default=advisor.DEFAULT_MODEL,
+        help=(
+            f"OpenAI chat model used for the advisory note. Default: "
+            f"{advisor.DEFAULT_MODEL}. This is deliberately a stronger "
+            "model than `--name-model` because the advisor reasons over "
+            "the whole run, not a single cluster."
+        ),
+    )
+    parser.add_argument(
         "--log-level",
         default="INFO",
         choices=["DEBUG", "INFO", "WARNING", "ERROR"],
@@ -192,9 +215,17 @@ def run(args: argparse.Namespace) -> Path:
     logger.info("=== voice-classifier start ===")
     logger.info("input=%s cols=%s output=%s", args.input, display_cols, run_dir)
 
-    # Step counts depend on whether LLM annotation runs.
+    # Step counts depend on which optional stages run.
+    # Base: 5 steps (load, embed, search, reps, write report).
     # `--name-clusters`: +3 steps (dataset context, generation, dedup).
-    total_steps = 8 if args.name_clusters else 5
+    # `--advise` (only when --name-clusters is also on, because the advisor
+    # uses cluster labels): +1 step.
+    run_advisor = args.advise and args.name_clusters
+    total_steps = 5
+    if args.name_clusters:
+        total_steps += 3
+    if run_advisor:
+        total_steps += 1
     reporter_ui = progress.ProgressReporter(total_steps=total_steps)
     reporter_ui.banner("voice-classifier")
 
@@ -256,6 +287,8 @@ def run(args: argparse.Namespace) -> Path:
     # Step 5 (optional): LLM annotation flow.
     cluster_annotations: dict[int, namer.ClusterAnnotation] = {}
     cluster_names: dict[int, str] = {}
+    dataset_context: namer.DatasetContext | None = None
+    dedup_converged: bool = True
     if args.name_clusters:
         # 5a. Infer the dataset meaning (grounding context).
         with reporter_ui.step("Infer dataset context") as step:
@@ -303,6 +336,9 @@ def run(args: argparse.Namespace) -> Path:
             duplicates_after = sum(
                 count for count in after.values() if count >= 2
             )
+            # Convergence tells the advisor whether the labels are clean
+            # enough to cite. Unresolved duplicates => it should caveat.
+            dedup_converged = duplicates_after == 0
             step.set_summary(
                 f"→ duplicates: {duplicates_before} → {duplicates_after}"
             )
@@ -310,6 +346,35 @@ def run(args: argparse.Namespace) -> Path:
         cluster_names = {
             cid: ann.label for cid, ann in cluster_annotations.items()
         }
+
+    # Step 6 (optional): LLM advisory note summarising the run.
+    # The advisor reasons over the whole result — selected algorithm,
+    # coverage stats, top labels — and produces a short Markdown verdict
+    # that gets inserted into parameter_search.html. We only run it when
+    # cluster labels are available, because the note cites them.
+    advice_md: str = ""
+    if run_advisor:
+        with reporter_ui.step("Generate advisory note") as step:
+            step.detail(f"model: {args.advisor_model}")
+            digest = advisor.build_run_digest(
+                best=best,
+                summaries=summaries,
+                cluster_annotations=cluster_annotations,
+                total_rows=len(df),
+                dataset_context=dataset_context,
+                dedup_converged=dedup_converged,
+            )
+            advice_md = advisor.generate_run_advice(
+                digest=digest,
+                model=args.advisor_model,
+            )
+            if advice_md:
+                preview = advice_md.split("\n", 1)[0][:80]
+                step.set_summary(
+                    f"→ {len(advice_md)} chars (preview: {preview}…)"
+                )
+            else:
+                step.set_summary("→ skipped (LLM call failed or empty)")
 
     # Final step: write reports.
     with reporter_ui.step("Write reports") as step:
@@ -326,6 +391,7 @@ def run(args: argparse.Namespace) -> Path:
             cluster_names=cluster_names,
             cluster_annotations=cluster_annotations,
             output_format=args.output_format,
+            advice_md=advice_md,
         )
         input_stem = Path(str(args.input)).stem
         classified_name = f"{input_stem}_classified.csv"

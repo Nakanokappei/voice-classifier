@@ -19,6 +19,7 @@ from typing import Any, Literal
 import numpy as np
 import pandas as pd
 
+from . import tuner as tuner_module
 from .clusterer import ClusterSummary, NOISE_LABEL
 from .namer import ClusterAnnotation
 from .tuner import BestConfig
@@ -68,6 +69,17 @@ ol li, ul li { margin: .2rem 0; }
 hr { border: none; border-top: 1px solid var(--border); margin: 1.5rem 0; }
 .footer { color: var(--muted); font-size: .85rem; margin-top: 3rem;
           text-align: right; }
+.advisory {
+  background: #f0f6fe;
+  border: 1px solid #b6d5ff;
+  border-left: 4px solid var(--accent);
+  padding: 1rem 1.3rem;
+  margin: 1.2rem 0 2rem;
+  border-radius: 4px;
+}
+.advisory h2 { margin-top: 0; border-bottom: 1px solid #b6d5ff;
+               color: var(--accent); }
+.advisory h3 { margin-top: 1.1rem; color: var(--fg); font-size: 1.02rem; }
 """.strip()
 
 
@@ -82,6 +94,7 @@ def write_report(
     cluster_names: dict[int, str] | None = None,
     cluster_annotations: dict[int, ClusterAnnotation] | None = None,
     output_format: OutputFormat = "md",
+    advice_md: str = "",
 ) -> None:
     """Write the output artifacts under `output_dir`.
 
@@ -96,6 +109,9 @@ def write_report(
         cluster_names: optional cluster_id -> label mapping
         cluster_annotations: optional cluster_id -> ClusterAnnotation mapping
         output_format: "md" / "html" / "both" for the report
+        advice_md: optional LLM-generated advisory markdown. When non-empty,
+            it is inserted at the top of `parameter_search.html` under the
+            chart so readers see the human-readable verdict first.
     """
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -142,11 +158,27 @@ def write_report(
 
     # Parameter-search: always HTML-only (so we can embed the SVG chart).
     chart_svg = _build_parameter_search_chart_svg(best)
+    # If the advisor produced a note, surface it at the very top of the
+    # parameter-search report — above the raw trial tables and below the
+    # quick-glance sweep chart. The note is rendered as Markdown so it can
+    # use headings, bullet lists, and emphasis consistent with the rest of
+    # the document.
+    if advice_md:
+        import markdown as _md
+        advice_html = _md.markdown(
+            advice_md, extensions=["tables", "fenced_code"]
+        )
+        advisory_block = (
+            f'<section class="advisory">{advice_html}</section>'
+        )
+        body_prefix = chart_svg + advisory_block
+    else:
+        body_prefix = chart_svg
     _write_html(
         output_dir / "parameter_search.html",
         parameter_search_md,
         "Parameter Search Report",
-        body_prefix=chart_svg,
+        body_prefix=body_prefix,
     )
 
     logger.info("Report written: %s (format=%s)", output_dir, output_format)
@@ -289,6 +321,166 @@ def _write_params_json(
 # ---------------------------------------------------------------------------
 
 
+def _build_pareto_chart_svg(
+    summaries: list[ClusterSummary],
+    total_rows: int,
+) -> str:
+    """Render a Pareto / cumulative-coverage curve as inline SVG.
+
+    Shows how many top-N clusters are needed to cover an increasing share of
+    the dataset. The "elbow" of this curve answers the product question
+    "how many FAQ entries cover most of our inbox?".
+
+    X-axis: cluster rank (largest first).
+    Y-axis: cumulative share of non-noise rows (0-100%).
+
+    Reference lines at 50%, 80%, and 95% help operators see where their
+    coverage target lands on the curve.
+    """
+    non_noise = sorted(
+        [s for s in summaries if s.cluster_id != NOISE_LABEL],
+        key=lambda s: s.size,
+        reverse=True,
+    )
+    if not non_noise or total_rows == 0:
+        return ""
+
+    sizes = [s.size for s in non_noise]
+    cum = []
+    running = 0
+    for sz in sizes:
+        running += sz
+        cum.append(running / total_rows * 100)  # percent of total rows
+
+    n = len(cum)
+    # Canvas dimensions.
+    width = 900
+    height = 360
+    margin_l, margin_r, margin_t, margin_b = 60, 30, 30, 60
+    chart_w = width - margin_l - margin_r
+    chart_h = height - margin_t - margin_b
+
+    # The Y axis always spans 0..100%. X spans 0..n (cluster ranks).
+    def x_for(rank: int) -> float:
+        if n <= 1:
+            return margin_l + chart_w / 2
+        return margin_l + chart_w * (rank - 1) / (n - 1)
+
+    def y_for(pct: float) -> float:
+        return margin_t + chart_h * (1 - min(pct, 100.0) / 100.0)
+
+    c_line = "#0969da"
+    c_fill = "rgba(9, 105, 218, 0.15)"
+    c_grid = "#d0d7de"
+    c_text = "#1f2328"
+    c_muted = "#57606a"
+    c_ref = "#bf8700"
+
+    svg: list[str] = []
+    svg.append(
+        f'<svg width="100%" viewBox="0 0 {width} {height}" '
+        f'xmlns="http://www.w3.org/2000/svg" '
+        f'style="max-width:{width}px;display:block;margin:0 auto;'
+        f'font-family:-apple-system,BlinkMacSystemFont,sans-serif;">'
+    )
+
+    # Horizontal reference lines at 50 / 80 / 95%.
+    for pct, label in ((50, "50%"), (80, "80%"), (95, "95%")):
+        y = y_for(pct)
+        svg.append(
+            f'<line x1="{margin_l}" y1="{y:.1f}" x2="{width - margin_r}" '
+            f'y2="{y:.1f}" stroke="{c_ref}" stroke-width="1" '
+            f'stroke-dasharray="4,3" opacity="0.6" />'
+        )
+        svg.append(
+            f'<text x="{width - margin_r + 4}" y="{y + 4:.1f}" '
+            f'font-size="10" fill="{c_ref}">{label}</text>'
+        )
+
+    # Y-axis ticks / grid at 0, 25, 50, 75, 100%.
+    for pct in (0, 25, 50, 75, 100):
+        y = y_for(pct)
+        svg.append(
+            f'<line x1="{margin_l}" y1="{y:.1f}" x2="{width - margin_r}" '
+            f'y2="{y:.1f}" stroke="{c_grid}" stroke-width="1" '
+            f'stroke-dasharray="1,2" opacity="0.4" />'
+        )
+        svg.append(
+            f'<text x="{margin_l - 6}" y="{y + 3:.1f}" text-anchor="end" '
+            f'font-size="11" fill="{c_muted}">{pct}%</text>'
+        )
+
+    # Axes.
+    svg.append(
+        f'<line x1="{margin_l}" y1="{margin_t}" x2="{margin_l}" '
+        f'y2="{margin_t + chart_h}" stroke="{c_text}" stroke-width="1.5" />'
+    )
+    svg.append(
+        f'<line x1="{margin_l}" y1="{margin_t + chart_h}" '
+        f'x2="{width - margin_r}" y2="{margin_t + chart_h}" '
+        f'stroke="{c_text}" stroke-width="1.5" />'
+    )
+
+    # Axis titles.
+    svg.append(
+        f'<text x="{margin_l + chart_w / 2:.1f}" y="{height - 18}" '
+        f'text-anchor="middle" font-size="12" fill="{c_text}">'
+        f'Cluster rank (largest first) — total {n} clusters</text>'
+    )
+    svg.append(
+        f'<text x="15" y="{margin_t + chart_h / 2:.1f}" font-size="12" '
+        f'fill="{c_text}" transform="rotate(-90 15 '
+        f'{margin_t + chart_h / 2:.1f})" text-anchor="middle">'
+        f'Cumulative coverage (% of rows)</text>'
+    )
+
+    # Area under the curve for visual emphasis.
+    area_points = " ".join(
+        f"{x_for(rank):.1f},{y_for(cum[rank - 1]):.1f}"
+        for rank in range(1, n + 1)
+    )
+    # Close the area down to the baseline at the right edge and back to origin.
+    last_x = x_for(n)
+    svg.append(
+        f'<polygon points="{margin_l},{margin_t + chart_h} {area_points} '
+        f'{last_x:.1f},{margin_t + chart_h}" fill="{c_fill}" stroke="none" />'
+    )
+
+    # The curve itself.
+    curve_points = [f"M {margin_l},{margin_t + chart_h}"]
+    for rank in range(1, n + 1):
+        curve_points.append(f"L {x_for(rank):.1f},{y_for(cum[rank - 1]):.1f}")
+    svg.append(
+        f'<path d="{" ".join(curve_points)}" fill="none" '
+        f'stroke="{c_line}" stroke-width="2.5" />'
+    )
+
+    # Markers at a few key rank positions so operators can read exact values.
+    highlight_ranks = {1, 5, 10, 20, 50, n}
+    for rank in sorted(r for r in highlight_ranks if 1 <= r <= n):
+        pct = cum[rank - 1]
+        cx, cy = x_for(rank), y_for(pct)
+        svg.append(
+            f'<circle cx="{cx:.1f}" cy="{cy:.1f}" r="3.5" '
+            f'fill="{c_line}">'
+            f'<title>Top {rank} clusters cover {pct:.1f}% of rows</title>'
+            f'</circle>'
+        )
+        # Show the % value slightly above the marker so it's readable.
+        svg.append(
+            f'<text x="{cx:.1f}" y="{cy - 8:.1f}" text-anchor="middle" '
+            f'font-size="10" fill="{c_text}">{pct:.0f}%</text>'
+        )
+        svg.append(
+            f'<text x="{cx:.1f}" y="{margin_t + chart_h + 14:.1f}" '
+            f'text-anchor="middle" font-size="10" fill="{c_muted}">'
+            f'{rank}</text>'
+        )
+
+    svg.append("</svg>")
+    return "\n".join(svg)
+
+
 def _build_faq_metrics_table(
     df: pd.DataFrame,
     summaries: list[ClusterSummary],
@@ -326,6 +518,12 @@ def _build_faq_metrics_table(
         lines.append("_Not enough clustered data to compute coverage._")
         lines.append("")
         return lines
+
+    # Pareto curve up front: the visual answer to "how many FAQs do I need?".
+    pareto_svg = _build_pareto_chart_svg(summaries, total_rows)
+    if pareto_svg:
+        lines.append(pareto_svg)
+        lines.append("")
 
     # Cumulative coverage table.
     sizes = [s.size for s in non_noise]
@@ -551,29 +749,55 @@ def _build_parameter_search_md(
         else:
             accepted.append(enriched)
 
-    # Accepted candidate ranking.
-    accepted.sort(key=lambda t: t["silhouette"], reverse=True)
+    # Accepted candidate ranking — sorted by the target-aware score so the
+    # table reflects the actual selection order, not a generic silhouette sort.
+    sweep_size = best.sweep_sample_size or sample_size
+    active_target = best.target
+    accepted.sort(
+        key=lambda t: tuner_module.score_trial_under_target(
+            t, sweep_size, active_target
+        ),
+        reverse=True,
+    )
     lines.append("## Accepted Candidates (Ranked)")
+    lines.append("")
+    lines.append(
+        f"Ranking follows the selected target (`{active_target}`). The "
+        "three right-most columns show what each trial would have scored "
+        "under every target, so you can see how the choice would differ "
+        "for another downstream use case."
+    )
     lines.append("")
     if not accepted:
         lines.append("_No candidates passed the filters._")
         lines.append("")
     else:
         lines.append(
-            "| Rank | Method | Parameters | Clusters | Noise (ratio) "
-            "| Silhouette | Status |"
+            "| Rank | Method | Parameters | Clusters | Noise (ratio) | "
+            "Max share | Silhouette | faq | chatbot | insight | Status |"
         )
-        lines.append("|---:|---|---|---:|---|---:|:---:|")
+        lines.append(
+            "|---:|---|---|---:|---|---:|---:|---:|---:|---:|:---:|"
+        )
         winner_key = (best.algorithm, _freeze_params(best.params))
         for rank, trial in enumerate(accepted, start=1):
             key = (trial["algorithm"], _freeze_params(trial["params"]))
             marker = "✓ Selected" if key == winner_key else "—"
-            noise_str = f"{trial['n_noise']} ({trial['noise_ratio'] * 100:.1f}%)"
+            noise_str = (
+                f"{trial['n_noise']} ({trial['noise_ratio'] * 100:.1f}%)"
+            )
+            max_share = float(trial.get("max_cluster_share", 0.0))
+            faq_s = tuner_module.score_trial_under_target(trial, sweep_size, "faq")
+            bot_s = tuner_module.score_trial_under_target(trial, sweep_size, "chatbot")
+            ins_s = tuner_module.score_trial_under_target(trial, sweep_size, "insight")
             lines.append(
                 f"| {rank} | {trial['algorithm']} | "
                 f"`{_format_params(trial['params'])}` "
                 f"| {trial['n_clusters']} | {noise_str} "
-                f"| {trial['silhouette']:.4f} | {marker} |"
+                f"| {max_share * 100:.1f}% "
+                f"| {trial['silhouette']:.4f} "
+                f"| {faq_s:.3f} | {bot_s:.3f} | {ins_s:.3f} "
+                f"| {marker} |"
             )
         lines.append("")
 

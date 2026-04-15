@@ -135,6 +135,8 @@ Your original data, plus a `cluster_id` column and, when available, a
 | `--target faq|chatbot|insight` | `faq` | Downstream-use-case-driven granularity. `faq`=30-80 clusters, `chatbot`=50-150 intents, `insight`=maximise silhouette |
 | `--name-clusters` / `--no-name-clusters` | on | Toggle LLM labelling |
 | `--name-model NAME` | `gpt-5.4-nano` | Chat model for labelling |
+| `--advise` / `--no-advise` | on | Toggle LLM advisory note at the top of `parameter_search.html` |
+| `--advisor-model NAME` | `gpt-5.4` | Chat model for the advisory note (reasons over the whole run) |
 | `--format md|html|both` | `md` | Format for `report.*` |
 | `--log-level LEVEL` | `INFO` | stderr log verbosity |
 

@@ -16,6 +16,7 @@ src/
 ├── tuner.py        Clustering sweep (KMeans/HDBSCAN/Leiden) + winner refit.
 ├── clusterer.py    Representative row extraction (top-K near centroid).
 ├── namer.py        LLM cluster labelling + summarisation + dedup.
+├── advisor.py      LLM advisory note summarising the whole run (stronger model).
 ├── reporter.py     Markdown / HTML / CSV / JSON output writers.
 ├── progress.py     CLI phase/progress display.
 └── utils.py        Cross-module helpers (normalise, hash, cache, retry).
@@ -231,7 +232,70 @@ the parameter differences:
 To onboard a new family, update these two helpers (`_uses_max_completion_tokens`
 and `_supports_custom_temperature`).
 
-### 3.6 `reporter`
+### 3.6 `advisor`
+
+**Public**
+
+```python
+@dataclass
+class RunDigest:
+    target: str
+    algorithm: str
+    params_text: str
+    silhouette: float
+    n_clusters: int
+    n_noise: int
+    total_rows: int
+    noise_ratio_pct: float
+    max_share_pct: float
+    coverage_top_n: list[tuple[int, float]]      # (N, cum% of total rows)
+    coverage_top_n_ex_noise: list[tuple[int, float]]
+    top_cluster_labels: list[tuple[str, int]]    # top 15 by size
+    dataset_domain: str
+    dataset_hint: str
+    dedup_converged: bool
+
+def build_run_digest(
+    best: BestConfig,
+    summaries: list[ClusterSummary],
+    cluster_annotations: dict[int, ClusterAnnotation] | None,
+    total_rows: int,
+    dataset_context: DatasetContext | None,
+    dedup_converged: bool,
+) -> RunDigest
+
+def generate_run_advice(
+    digest: RunDigest,
+    model: str = DEFAULT_MODEL,   # "gpt-5.4"
+    api_key: str | None = None,
+) -> str  # Markdown; empty string on failure
+```
+
+**Rationale**
+
+- The advisor is a separate module from `namer` because it uses a stronger
+  model (default `gpt-5.4` vs. `gpt-5.4-nano`) and reasons over the whole
+  run rather than a single cluster.
+- `build_run_digest` is pure data reduction. It can be tested without any
+  network access, and `generate_run_advice` is the only function that
+  performs API I/O.
+- Failure is non-fatal: `generate_run_advice` returns `""` on retry
+  exhaustion, and the caller simply omits the advisory section.
+- The Markdown sections are prescribed in the system prompt (`## Advisory`,
+  then `### Verdict`, `### How to use these clusters`, `### Caveats and
+  things to watch`, `### Recommended next steps`) so `reporter.py` can
+  inject a single `<section class="advisory">` wrapper in HTML.
+
+**Invariants**
+
+- The digest reports coverage at ranks `[1, 5, 10, 20, 50, 100]` (clamped
+  to the number of non-noise clusters actually available).
+- `top_cluster_labels` is at most 15 items; beyond that the prompt grows
+  without adding signal.
+- An accidental ``` fence around the response is stripped by
+  `_sanitise_markdown` before return.
+
+### 3.7 `reporter`
 
 **Public**
 
@@ -247,8 +311,14 @@ def write_report(
     cluster_names: dict[int, str] | None = None,
     cluster_annotations: dict[int, ClusterAnnotation] | None = None,
     output_format: OutputFormat = "md",
+    advice_md: str = "",
 ) -> None
 ```
+
+When `advice_md` is non-empty it is rendered to HTML and injected as a
+`<section class="advisory">` block immediately below the sweep chart in
+`parameter_search.html`. The `.advisory` CSS rule is part of the embedded
+stylesheet so the report remains a single self-contained file.
 
 **Artefact decisions**
 
@@ -264,13 +334,13 @@ def write_report(
 `parameter_search.md` **was** part of an earlier design and has been
 retired; the chart-enabled HTML is the single source of truth.
 
-### 3.7 `progress`
+### 3.8 `progress`
 
 Phase-based reporter with ANSI-aware line overwriting. Contract is
 intentionally small — if another module ever needs progress reporting, it
 should use this class rather than rolling its own.
 
-### 3.8 `utils`
+### 3.9 `utils`
 
 Shared primitives. Any duplication of these helpers across modules is a
 code smell — add a new helper here instead.

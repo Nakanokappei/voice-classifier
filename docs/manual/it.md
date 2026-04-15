@@ -127,8 +127,11 @@ data/output/20260416_012345/
 | `--top-k N` | `5` | Rappresentanti per cluster |
 | `--min-clusters N` | `2` | Limite inferiore per K |
 | `--max-clusters N` | `20` | Limite superiore per K |
+| `--target faq|chatbot|insight` | `faq` | Granularità per caso d'uso. `faq`=30-80 cluster (FAQ), `chatbot`=50-150 (intenti), `insight`=silhouette massima |
 | `--name-clusters` / `--no-name-clusters` | on | Etichettatura LLM on/off |
 | `--name-model NAME` | `gpt-5.4-nano` | Modello chat per l'etichettatura |
+| `--advise` / `--no-advise` | on | Nota consultiva LLM all'inizio di `parameter_search.html` |
+| `--advisor-model NAME` | `gpt-5.4` | Modello di chat per la nota consultiva (ragiona sull'intera esecuzione) |
 | `--format md|html|both` | `md` | Formato di `report.*` |
 | `--log-level LEVEL` | `INFO` | Verbosità stderr |
 

@@ -126,8 +126,11 @@ data/output/20260416_012345/
 | `--top-k N` | `5` | 클러스터별 대표 행 수 |
 | `--min-clusters N` | `2` | K 하한 |
 | `--max-clusters N` | `20` | K 상한 |
+| `--target faq|chatbot|insight` | `faq` | 용도별 세분화. `faq`=30-80 클러스터 (FAQ), `chatbot`=50-150 (인텐트), `insight`=silhouette 최대화 |
 | `--name-clusters` / `--no-name-clusters` | 사용 | LLM 레이블링 on/off |
 | `--name-model NAME` | `gpt-5.4-nano` | 레이블링용 챗 모델 |
+| `--advise` / `--no-advise` | on | `parameter_search.html` 상단에 LLM 조언 노트 추가 |
+| `--advisor-model NAME` | `gpt-5.4` | 조언 노트용 챗 모델 (실행 전체를 분석하므로 더 강력한 모델) |
 | `--format md|html|both` | `md` | `report.*` 형식 |
 | `--log-level LEVEL` | `INFO` | stderr 로그 수준 |
 

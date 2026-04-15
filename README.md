@@ -65,6 +65,8 @@ python src/pipeline.py \
 | `--target` | `faq` | Downstream use case to optimise for. `faq` prefers 30-80 clusters (good for FAQ pages), `chatbot` targets 50-150 finer intents, `insight` maximises silhouette for exploratory analysis. |
 | `--name-clusters` / `--no-name-clusters` | **on** | LLM label + summary per cluster (default on). Flow: (1) infer dataset context from 5 samples → (2) grounded parallel label generation → (3) duplicate-label resolution (up to 3 passes). The summary is shown as "Representative text" in the report; raw near-centroid rows remain visible below as verification. Use `--no-name-clusters` to skip LLM calls. |
 | `--name-model` / `--llm-model` | `gpt-5.4-nano` | Chat model for cluster labelling. API differences across GPT-5 / o-series / GPT-4o / GPT-3.5 (e.g. `max_completion_tokens` vs `max_tokens`) are handled automatically. |
+| `--advise` / `--no-advise` | **on** | Generate an LLM advisory note summarising what the chosen configuration means for downstream use (FAQ / chatbot / insight). Inserted at the top of `parameter_search.html`. Requires `--name-clusters` so the advisor can cite real cluster labels. |
+| `--advisor-model` | `gpt-5.4` | Chat model used for the advisory note. Deliberately a stronger model than `--name-model` because the advisor reasons over the whole run, not a single cluster. |
 | `--format` | `md` | Report format: `md` / `html` / `both` |
 
 ### Examples
@@ -89,7 +91,9 @@ Per run, a directory under `data/output/YYYYMMDD_HHMMSS/` is created:
 
 - `report.md` / `report.html` — clustering result (chosen config, per-cluster
   representative text)
-- `parameter_search.html` — full search report with a dual-axis chart on top
+- `parameter_search.html` — full search report with a dual-axis chart and
+  Pareto coverage curve on top, followed (when `--advise` is enabled) by an
+  LLM advisory section summarising the run in plain language
 - `clusters.csv` — **cluster list** (one row per cluster): `id, name, size, summary, rep_1..N`
 - `<input>_classified.csv` — original data with `cluster_id` / `cluster_name`
   appended

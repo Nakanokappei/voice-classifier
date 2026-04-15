@@ -27,6 +27,7 @@ voice-classifier/
 │   ├── tuner.py            ← parameter sweep and best-method auto-selection
 │   ├── clusterer.py        ← run clustering, extract representative texts
 │   ├── namer.py            ← LLM-based cluster labelling / summarisation
+│   ├── advisor.py          ← LLM advisory note over the whole run (stronger model)
 │   ├── reporter.py         ← generate reports (Markdown / HTML / CSV / JSON)
 │   └── progress.py         ← CLI progress display utilities
 │
@@ -106,7 +107,7 @@ Outputs are written under `data/output/YYYYMMDD_HHMMSS/`:
 | File | Content |
 |---|---|
 | `report.md` / `report.html` | Clustering result (selected config, per-cluster reps) |
-| `parameter_search.html` | Parameter-search report with a dual-axis chart on top |
+| `parameter_search.html` | Parameter-search report; top: dual-axis chart + Pareto curve + (optional) LLM advisory note explaining the result |
 | `clusters.csv` | One row per cluster: `cluster_id, cluster_name, size, summary, rep_1..N` |
 | `<input>_classified.csv` | Every input row annotated with `cluster_id` / `cluster_name` |
 | `params.json` | Machine-readable metadata: algorithm, params, score, search meta |

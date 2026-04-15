@@ -120,8 +120,11 @@ data/output/20260416_012345/
 | `--top-k N` | `5` | 每聚类代表行数量 |
 | `--min-clusters N` | `2` | K 下界 |
 | `--max-clusters N` | `20` | K 上界 |
+| `--target faq|chatbot|insight` | `faq` | 按用途的粒度. `faq`=30-80 聚类（FAQ 页面）, `chatbot`=50-150 (意图), `insight`=最大化 silhouette |
 | `--name-clusters` / `--no-name-clusters` | 开 | LLM 标签生成开关 |
 | `--name-model NAME` | `gpt-5.4-nano` | 标签生成的 chat 模型 |
+| `--advise` / `--no-advise` | on | 在 `parameter_search.html` 顶部插入 LLM 助言说明 |
+| `--advisor-model NAME` | `gpt-5.4` | 助言说明使用的聊天模型（对整次运行进行分析） |
 | `--format md|html|both` | `md` | `report.*` 格式 |
 | `--log-level LEVEL` | `INFO` | stderr 日志级别 |
 

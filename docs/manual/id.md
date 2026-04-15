@@ -127,8 +127,11 @@ data/output/20260416_012345/
 | `--top-k N` | `5` | Baris representatif per klaster |
 | `--min-clusters N` | `2` | Batas bawah K |
 | `--max-clusters N` | `20` | Batas atas K |
+| `--target faq|chatbot|insight` | `faq` | Granularitas berdasarkan kasus pemakaian. `faq`=30-80 klaster (FAQ), `chatbot`=50-150 (intent), `insight`=silhouette maksimum |
 | `--name-clusters` / `--no-name-clusters` | on | Aktif/mati pelabelan LLM |
 | `--name-model NAME` | `gpt-5.4-nano` | Model chat untuk pelabelan |
+| `--advise` / `--no-advise` | on | Catatan saran LLM di bagian atas `parameter_search.html` |
+| `--advisor-model NAME` | `gpt-5.4` | Model chat untuk catatan saran (menganalisis keseluruhan run) |
 | `--format md|html|both` | `md` | Format `report.*` |
 | `--log-level LEVEL` | `INFO` | Verbositas stderr |
 

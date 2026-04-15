@@ -19,6 +19,8 @@ python src/pipeline.py
     [--max-clusters N]
     [--name-clusters | --no-name-clusters]
     [--name-model NAME | --llm-model NAME]
+    [--advise | --no-advise]
+    [--advisor-model NAME]
     [--format md|html|both]
     [--log-level DEBUG|INFO|WARNING|ERROR]
 ```
@@ -60,6 +62,8 @@ first candidate is auto-selected.
 | `--target` | `faq` | Which downstream use case the clustering should optimise for. `faq` prefers 30-80 clusters with max share ≤ 10%. `chatbot` targets 50-150 finer intents with share ≤ 7%. `insight` maximises silhouette with no cluster-count bias. |
 | `--name-clusters` / `--no-name-clusters` | on | Toggle LLM labelling + summarisation. |
 | `--name-model` / `--llm-model` | `gpt-5.4-nano` | OpenAI chat model used for labelling. API-spec differences across model families are absorbed automatically. |
+| `--advise` / `--no-advise` | on | Toggle the LLM advisory note inserted at the top of `parameter_search.html`. No-op without `--name-clusters`. |
+| `--advisor-model` | `gpt-5.4` | OpenAI chat model used for the advisory note. A stronger model than `--name-model` because it reasons over the whole run. |
 | `--format` | `md` | Report format for `report.*`. `parameter_search.html` is always emitted regardless. |
 | `--log-level` | `INFO` | stderr verbosity. `run.log` always captures INFO+. |
 

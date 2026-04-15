@@ -126,8 +126,11 @@ data/output/20260416_012345/
 | `--top-k N` | `5` | Repräsentanten pro Cluster |
 | `--min-clusters N` | `2` | Untere K-Grenze |
 | `--max-clusters N` | `20` | Obere K-Grenze |
+| `--target faq|chatbot|insight` | `faq` | Zielgranularität. `faq`=30-80 Cluster (FAQ), `chatbot`=50-150 (Intents), `insight`=maximale Silhouette |
 | `--name-clusters` / `--no-name-clusters` | an | LLM-Labeling ein/aus |
 | `--name-model NAME` | `gpt-5.4-nano` | Chat-Modell fürs Labeling |
+| `--advise` / `--no-advise` | on | LLM-Hinweis oben in `parameter_search.html` ein/aus |
+| `--advisor-model NAME` | `gpt-5.4` | Chat-Modell für den Hinweis (analysiert den gesamten Lauf) |
 | `--format md|html|both` | `md` | Format von `report.*` |
 | `--log-level LEVEL` | `INFO` | Verbosität auf stderr |
 

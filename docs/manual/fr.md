@@ -127,8 +127,11 @@ data/output/20260416_012345/
 | `--top-k N` | `5` | Représentants par cluster |
 | `--min-clusters N` | `2` | Borne inférieure de K |
 | `--max-clusters N` | `20` | Borne supérieure de K |
+| `--target faq|chatbot|insight` | `faq` | Granularité selon l'usage. `faq`=30-80 clusters (FAQ), `chatbot`=50-150 (intentions), `insight`=silhouette maximale |
 | `--name-clusters` / `--no-name-clusters` | activé | Étiquetage LLM on/off |
 | `--name-model NAME` | `gpt-5.4-nano` | Modèle chat pour l'étiquetage |
+| `--advise` / `--no-advise` | on | Note d'avis LLM en haut de `parameter_search.html` |
+| `--advisor-model NAME` | `gpt-5.4` | Modèle de chat pour la note d'avis (raisonne sur l'exécution entière) |
 | `--format md|html|both` | `md` | Format de `report.*` |
 | `--log-level LEVEL` | `INFO` | Verbosité stderr |
 

@@ -126,8 +126,11 @@ data/output/20260416_012345/
 | `--top-k N` | `5` | Số đại diện mỗi cụm |
 | `--min-clusters N` | `2` | Biên dưới của K |
 | `--max-clusters N` | `20` | Biên trên của K |
+| `--target faq|chatbot|insight` | `faq` | Mức độ chi tiết theo ca dùng. `faq`=30-80 cụm (trang FAQ), `chatbot`=50-150 (intent), `insight`=tối đa silhouette |
 | `--name-clusters` / `--no-name-clusters` | bật | Bật/tắt gắn nhãn LLM |
 | `--name-model NAME` | `gpt-5.4-nano` | Mô hình chat để gắn nhãn |
+| `--advise` / `--no-advise` | on | Ghi chú tư vấn LLM ở đầu `parameter_search.html` |
+| `--advisor-model NAME` | `gpt-5.4` | Mô hình chat cho ghi chú tư vấn (phân tích toàn bộ lần chạy) |
 | `--format md|html|both` | `md` | Định dạng `report.*` |
 | `--log-level LEVEL` | `INFO` | Mức độ chi tiết stderr |
 

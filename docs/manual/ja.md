@@ -127,6 +127,8 @@ data/output/20260416_012345/
 | `--target faq|chatbot|insight` | `faq` | 目的別の粒度最適化. `faq`=30〜80クラスタ（FAQページ向き）、`chatbot`=50〜150（意図分岐向き）、`insight`=シルエット最大（探索向き） |
 | `--name-clusters` / `--no-name-clusters` | ON | LLM ラベル生成の ON/OFF |
 | `--name-model NAME` | `gpt-5.4-nano` | ラベル生成用 Chat モデル |
+| `--advise` / `--no-advise` | on | `parameter_search.html` 冒頭に LLM 助言ノートを挿入 |
+| `--advisor-model NAME` | `gpt-5.4` | 助言ノート用のチャットモデル（実行全体を読み解くので強めのモデル） |
 | `--format md|html|both` | `md` | `report.*` の形式 |
 | `--log-level LEVEL` | `INFO` | stderr のログレベル |
 

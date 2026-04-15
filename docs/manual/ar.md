@@ -127,8 +127,11 @@ data/output/20260416_012345/
 | `--top-k N` | `5` | عدد الصفوف الممثِّلة لكل مجموعة |
 | `--min-clusters N` | `2` | الحد الأدنى لقيمة K |
 | `--max-clusters N` | `20` | الحد الأعلى لقيمة K |
+| `--target faq|chatbot|insight` | `faq` | تحديد الدقة حسب الاستخدام. `faq`=30-80 مجموعة (صفحات الأسئلة الشائعة)، `chatbot`=50-150 (نوايا)، `insight`=أعلى silhouette |
 | `--name-clusters` / `--no-name-clusters` | مفعَّل | تشغيل/إيقاف التسمية عبر LLM |
 | `--name-model NAME` | `gpt-5.4-nano` | نموذج الدردشة للتسمية |
+| `--advise` / `--no-advise` | on | ملاحظة استشارية من LLM في أعلى `parameter_search.html` |
+| `--advisor-model NAME` | `gpt-5.4` | نموذج الدردشة للملاحظة الاستشارية (يحلل التشغيل بالكامل) |
 | `--format md|html|both` | `md` | صيغة `report.*` |
 | `--log-level LEVEL` | `INFO` | مستوى التفاصيل على stderr |
 

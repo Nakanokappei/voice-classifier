@@ -120,8 +120,11 @@ data/output/20260416_012345/
 | `--top-k N` | `5` | 每群集代表列的數量 |
 | `--min-clusters N` | `2` | K 下界 |
 | `--max-clusters N` | `20` | K 上界 |
+| `--target faq|chatbot|insight` | `faq` | 依用途的粒度. `faq`=30-80 分群（FAQ 頁面）, `chatbot`=50-150 (意圖), `insight`=最大化 silhouette |
 | `--name-clusters` / `--no-name-clusters` | 開 | LLM 標籤開關 |
 | `--name-model NAME` | `gpt-5.4-nano` | 標籤用 chat 模型 |
+| `--advise` / `--no-advise` | on | 在 `parameter_search.html` 頂端插入 LLM 建議說明 |
+| `--advisor-model NAME` | `gpt-5.4` | 建議說明使用的聊天模型（對整次執行進行分析） |
 | `--format md|html|both` | `md` | `report.*` 格式 |
 | `--log-level LEVEL` | `INFO` | stderr 日誌等級 |
 
