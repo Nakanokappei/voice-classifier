@@ -76,6 +76,12 @@ SWEEP_SAMPLE_SIZE: int = 5000
 # roughly 17 ms per candidate.
 SILHOUETTE_SAMPLE_CAP: int = 2000
 
+# If the dataset is no larger than this, skip subsampling entirely and run
+# the sweep on the full data. Between SWEEP_SAMPLE_SIZE and this threshold,
+# the added runtime of using all rows is small compared to the variance
+# introduced by discarding up to half the data.
+SWEEP_FULL_DATA_THRESHOLD: int = 10000
+
 # High-dimensional embeddings (e.g. 1,536d) suffer from distance concentration,
 # which collapses cosine similarities into a narrow band and destroys the
 # discriminative power of KMeans/DBSCAN/HDBSCAN. Projecting onto ~30 PCA
@@ -190,8 +196,16 @@ def find_best_clustering(
         embeddings.shape[1], reduced.shape[1], pca_model is not None,
     )
 
-    # Phase 1: sampling -> sweep.
-    sample_indices = _sample_indices(n_samples, SWEEP_SAMPLE_SIZE, seed=RANDOM_STATE)
+    # Phase 1: sample + sweep.
+    # For "small" datasets (≤ SWEEP_FULL_DATA_THRESHOLD) we keep all rows so
+    # the winning config is chosen on the true distribution. Beyond that we
+    # subsample to SWEEP_SAMPLE_SIZE to keep the sweep interactive.
+    if n_samples <= SWEEP_FULL_DATA_THRESHOLD:
+        sample_indices = np.arange(n_samples)
+    else:
+        sample_indices = _sample_indices(
+            n_samples, SWEEP_SAMPLE_SIZE, seed=RANDOM_STATE
+        )
     sample = reduced[sample_indices]
     logger.info(
         "tuner: phase1 sweep on %d / %d points (hdbscan=%s)",
