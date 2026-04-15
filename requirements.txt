@@ -1,0 +1,17 @@
+# Core
+openai>=1.30.0
+python-dotenv>=1.0.0
+
+# Data
+pandas>=2.1.0
+numpy>=1.26.0
+
+# Clustering / metrics
+scikit-learn>=1.4.0
+hdbscan>=0.8.33
+
+# UX
+tqdm>=4.66.0
+
+# Testing (dev)
+pytest>=8.0.0

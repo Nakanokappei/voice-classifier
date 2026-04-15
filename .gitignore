@@ -1,0 +1,35 @@
+# Environment / secrets
+.env
+.env.*
+!.env.example
+
+# Data & outputs (may contain PII)
+data/input/
+data/output/
+cache/
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+.coverage
+htmlcov/
+
+# IDE / OS
+.vscode/
+.idea/
+.DS_Store
+._*
+Thumbs.db
+
+# Claude Code local settings (may contain user-specific rules)
+.claude/settings.local.json
+
+# Build artifacts
+dist/
+build/
+*.whl
