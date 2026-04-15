@@ -101,3 +101,58 @@ def test_all_empty_raises_value_error(tmp_path: Path) -> None:
 
     with pytest.raises(ValueError):
         loader.load_csv(csv_path, text_col="対応内容")
+
+
+# ---------------------------------------------------------------------------
+# suggest_text_columns
+# ---------------------------------------------------------------------------
+
+
+def test_suggest_text_columns_prefers_long_unique_text(tmp_path: Path) -> None:
+    """長文でユニークな列が先頭に来ること."""
+    csv_path = tmp_path / "input.csv"
+    _write_csv(
+        csv_path,
+        "id,カテゴリ,対応内容\n"
+        "1,返品,商品が届きましたが色が思っていたものと違いました. 返品を希望します.\n"
+        "2,配送,予定日を過ぎても届かないため状況を教えてほしいです.\n"
+        "3,返品,サイズが合わなかったので返品したいです. よろしくお願いします.\n"
+        "4,配送,商品が破損した状態で届きました. 交換を希望します.\n",
+    )
+
+    candidates = loader.suggest_text_columns(csv_path)
+
+    assert candidates, "候補が見つかるべき"
+    # 長文である 対応内容 列が最上位
+    assert candidates[0].name == "対応内容"
+    # id (数値) とカテゴリ (短い繰り返し) はいずれも候補から除外されるべき
+    names = [c.name for c in candidates]
+    assert "id" not in names
+    # カテゴリは平均長10字未満 + ユニーク率も低いので除外される想定
+    # （ただし実装が含めた場合でも対応内容より下位になることを確認）
+    if "カテゴリ" in names:
+        assert names.index("対応内容") < names.index("カテゴリ")
+
+
+def test_suggest_text_columns_excludes_short_fields(tmp_path: Path) -> None:
+    """平均長 10 文字未満の列は候補から除外されること."""
+    csv_path = tmp_path / "input.csv"
+    _write_csv(
+        csv_path,
+        "code,詳細な説明テキスト\n"
+        "A1,これは十分な長さの説明文が入っている列でテキスト分析に適しています\n"
+        "B2,別の十分に長い説明がここに入ります. クラスタリング対象として有望です\n",
+    )
+
+    candidates = loader.suggest_text_columns(csv_path)
+    names = [c.name for c in candidates]
+    assert "code" not in names
+    assert "詳細な説明テキスト" in names
+
+
+def test_suggest_text_columns_empty_csv_returns_empty(tmp_path: Path) -> None:
+    """全列が空の場合は空リスト."""
+    csv_path = tmp_path / "input.csv"
+    _write_csv(csv_path, "a,b\n,\n,\n")
+    candidates = loader.suggest_text_columns(csv_path)
+    assert candidates == []

@@ -36,7 +36,9 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--input", required=True, type=Path, help="入力CSVパス"
     )
     parser.add_argument(
-        "--text-col", required=True, help="分類対象テキストの列名"
+        "--text-col",
+        default=None,
+        help="分類対象テキストの列名. 省略時は対話的に候補から選択",
     )
     parser.add_argument(
         "--output-dir",
@@ -76,11 +78,15 @@ def run(args: argparse.Namespace) -> Path:
 
     _configure_logging(args.log_level, run_dir / "run.log")
 
+    # text-col が未指定なら候補を提示して対話的に決定
+    text_col = args.text_col or _resolve_text_col_interactively(args.input)
+    args.text_col = text_col
+
     logger.info("=== voice-classifier 開始 ===")
-    logger.info("input=%s text_col=%s output=%s", args.input, args.text_col, run_dir)
+    logger.info("input=%s text_col=%s output=%s", args.input, text_col, run_dir)
 
     # Step 1: CSV 読み込み + 正規化
-    df = loader.load_csv(args.input, args.text_col)
+    df = loader.load_csv(args.input, text_col)
 
     # Step 2: 埋め込み取得（キャッシュ優先）
     texts = df["_normalized_text"].tolist()
@@ -131,6 +137,58 @@ def main(argv: list[str] | None = None) -> int:
         logger.exception("パイプラインが失敗しました")
         return 1
     return 0
+
+
+def _resolve_text_col_interactively(input_path: Path) -> str:
+    """`--text-col` 未指定時、CSVを解析して候補を提示しユーザに選ばせる.
+
+    - 1 件しか候補がなければ確認のみで即採用
+    - 複数あれば番号で選択、Enter で先頭候補
+    """
+    candidates = loader.suggest_text_columns(input_path)
+    if not candidates:
+        raise ValueError(
+            f"{input_path} からテキスト列候補が見つかりません. "
+            "--text-col で明示的に指定してください"
+        )
+
+    print("\n対象テキスト列の候補:", file=sys.stderr)
+    for idx, cand in enumerate(candidates, start=1):
+        sample_preview = " / ".join(
+            s[:40] + ("…" if len(s) > 40 else "") for s in cand.sample_values
+        )
+        print(
+            f"  [{idx}] {cand.name}  "
+            f"(平均 {cand.avg_length:.0f}字, 非空 {cand.non_empty_ratio * 100:.0f}%, "
+            f"ユニーク率 {cand.unique_ratio * 100:.0f}%)\n"
+            f"       例: {sample_preview}",
+            file=sys.stderr,
+        )
+
+    if len(candidates) == 1:
+        chosen = candidates[0]
+        print(f"\n単一候補のため採用: {chosen.name}\n", file=sys.stderr)
+        return chosen.name
+
+    # 対話入力（非対話環境では先頭候補を採用）
+    default = candidates[0]
+    if not sys.stdin.isatty():
+        print(
+            f"\n非対話モード: 先頭候補 {default.name} を採用\n",
+            file=sys.stderr,
+        )
+        return default.name
+
+    while True:
+        raw = input(f"\n番号を選択 [1-{len(candidates)}], Enter で [{default.name}]: ")
+        choice = raw.strip()
+        if not choice:
+            return default.name
+        if choice.isdigit():
+            idx = int(choice)
+            if 1 <= idx <= len(candidates):
+                return candidates[idx - 1].name
+        print("無効な入力です", file=sys.stderr)
 
 
 def _configure_logging(level: str, log_path: Path) -> None:

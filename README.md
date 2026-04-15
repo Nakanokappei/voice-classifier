@@ -1,5 +1,7 @@
 # voice-classifier
 
+[![CI](https://github.com/Nakanokappei/voice-classifier/actions/workflows/ci.yml/badge.svg)](https://github.com/Nakanokappei/voice-classifier/actions/workflows/ci.yml)
+
 顧客の声（カスタマーサポート対応履歴CSV）を自動で分類し、
 クラスターごとの代表テキストと洞察レポートを生成する分析パイプライン。
 
@@ -47,7 +49,7 @@ python src/pipeline.py \
 | オプション | 既定 | 説明 |
 |---|---|---|
 | `--input` | 必須 | 入力CSVパス |
-| `--text-col` | 必須 | 分類対象テキストの列名 |
+| `--text-col` | 省略可 | 分類対象テキストの列名. 省略時は候補を対話的に提示 |
 | `--output-dir` | `data/output` | 出力ディレクトリルート |
 | `--cache-dir` | `cache` | 埋め込みキャッシュ保存先 |
 | `--model` | `text-embedding-3-small` | 埋め込みモデル |

@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import logging
 import unicodedata
+from dataclasses import dataclass
 from pathlib import Path
 
 import pandas as pd
@@ -21,6 +22,9 @@ MAX_TEXT_LENGTH: int = 4000
 
 # 試行するエンコーディング順。UTF-8系を優先し、Windows Excel互換にCP932を後段で試す
 ENCODING_CANDIDATES: tuple[str, ...] = ("utf-8-sig", "utf-8", "cp932")
+
+# 自動推定で「テキスト列っぽい」と判定する平均長の下限
+AUTO_DETECT_MIN_AVG_LENGTH: float = 10.0
 
 
 def load_csv(path: Path | str, text_col: str) -> pd.DataFrame:
@@ -75,6 +79,87 @@ def load_csv(path: Path | str, text_col: str) -> pd.DataFrame:
 # ---------------------------------------------------------------------------
 # Internal helpers
 # ---------------------------------------------------------------------------
+
+
+@dataclass
+class ColumnCandidate:
+    """テキスト列候補の評価情報.
+
+    Attributes:
+        name: 列名
+        avg_length: 平均文字数（空文字列は除外）
+        non_empty_ratio: 非空の行割合
+        unique_ratio: ユニーク値の割合（重複が多いと低い = カテゴリ列の可能性）
+        sample_values: 判定根拠を示す最大3件のサンプル
+    """
+
+    name: str
+    avg_length: float
+    non_empty_ratio: float
+    unique_ratio: float
+    sample_values: list[str]
+
+    @property
+    def score(self) -> float:
+        """テキスト列らしさのスコア.
+
+        長文かつ非空率が高く、ユニーク率も高いほど高スコア.
+        カテゴリ列（"返品"/"配送" のような少数値の繰り返し）は低スコアに落ちる.
+        """
+        return self.avg_length * self.non_empty_ratio * (0.5 + 0.5 * self.unique_ratio)
+
+
+def suggest_text_columns(path: Path | str, top_k: int = 5) -> list[ColumnCandidate]:
+    """CSVの各列を解析し、テキスト列として有望な候補を score 降順で返す.
+
+    Args:
+        path: 入力CSVパス
+        top_k: 返す候補数の上限
+
+    Returns:
+        score 降順の ColumnCandidate リスト（空列や数値列は除外済み）
+
+    Raises:
+        FileNotFoundError: 指定パスが存在しない
+    """
+    path = Path(path)
+    if not path.exists():
+        raise FileNotFoundError(f"入力CSVが見つかりません: {path}")
+
+    df = _read_csv_with_fallback(path)
+
+    candidates: list[ColumnCandidate] = []
+    for col in df.columns:
+        # ヘッダなしで読み込まれた空文字列カラムはスキップ
+        if not str(col).strip():
+            continue
+
+        series = df[col].astype(str).map(lambda v: v.strip() if v != "nan" else "")
+        non_empty = series[series.str.len() > 0]
+        if non_empty.empty:
+            continue
+
+        avg_length = float(non_empty.str.len().mean())
+        # 平均が短すぎる列はテキストと見なさない（IDや数値コード等）
+        if avg_length < AUTO_DETECT_MIN_AVG_LENGTH:
+            continue
+
+        non_empty_ratio = float(len(non_empty) / len(df))
+        unique_ratio = float(non_empty.nunique() / len(non_empty))
+        samples = non_empty.head(3).tolist()
+
+        candidates.append(
+            ColumnCandidate(
+                name=str(col),
+                avg_length=avg_length,
+                non_empty_ratio=non_empty_ratio,
+                unique_ratio=unique_ratio,
+                sample_values=samples,
+            )
+        )
+
+    candidates.sort(key=lambda c: c.score, reverse=True)
+    return candidates[:top_k]
 
 
 def _read_csv_with_fallback(path: Path) -> pd.DataFrame:
