@@ -151,7 +151,8 @@ def run(args: argparse.Namespace) -> Path:
     logger.info("input=%s cols=%s output=%s", args.input, display_cols, run_dir)
 
     # ネーミングステップを実行するかでフェーズ数が変わる
-    total_steps = 6 if args.name_clusters else 5
+    # --name-clusters 指定時: 推定 + 生成 + 重複解消 の 3 ステップ追加
+    total_steps = 8 if args.name_clusters else 5
     reporter_ui = progress.ProgressReporter(total_steps=total_steps)
     reporter_ui.banner("voice-classifier")
 
@@ -212,16 +213,27 @@ def run(args: argparse.Namespace) -> Path:
     cluster_annotations: dict[int, namer.ClusterAnnotation] = {}
     cluster_names: dict[int, str] = {}
     if args.name_clusters:
-        with reporter_ui.step("クラスタのラベル+要約を生成") as step:
+        # 5a. データセットの意味を推定（グラウンディング情報）
+        with reporter_ui.step("データセットの意味を推定") as step:
             step.detail(f"モデル: {args.name_model}")
+            dataset_context = namer.infer_dataset_context(
+                texts=df["_normalized_text"].tolist(),
+                model=args.name_model,
+            )
+            step.set_summary(
+                f"→ domain={dataset_context.domain} / "
+                f"{dataset_context.granularity_hint}"
+            )
+
+        # 5b. ラベル+要約を並列生成（グラウンディング注入）
+        with reporter_ui.step("クラスタのラベル+要約を生成") as step:
+            step.detail(f"並列度: {namer.MAX_CONCURRENCY}")
             cluster_annotations = namer.generate_cluster_annotations(
                 summaries=summaries,
                 cache_dir=args.cache_dir,
                 model=args.name_model,
+                dataset_context=dataset_context,
             )
-            cluster_names = {
-                cid: ann.label for cid, ann in cluster_annotations.items()
-            }
             preview = [
                 f"#{cid}:{ann.label}"
                 for cid, ann in list(cluster_annotations.items())[:3]
@@ -229,6 +241,30 @@ def run(args: argparse.Namespace) -> Path:
             step.set_summary(
                 f"→ {len(cluster_annotations)}件 例: {', '.join(preview)}"
             )
+
+        # 5c. ラベル重複解消（小さい側を差別化）
+        with reporter_ui.step("ラベル重複を解消") as step:
+            before = namer._label_frequencies(cluster_annotations)
+            duplicates_before = sum(
+                count for count in before.values() if count >= 2
+            )
+            cluster_annotations = namer.resolve_label_duplicates(
+                summaries=summaries,
+                annotations=cluster_annotations,
+                model=args.name_model,
+                dataset_context=dataset_context,
+            )
+            after = namer._label_frequencies(cluster_annotations)
+            duplicates_after = sum(
+                count for count in after.values() if count >= 2
+            )
+            step.set_summary(
+                f"→ 重複 {duplicates_before}件 → {duplicates_after}件"
+            )
+
+        cluster_names = {
+            cid: ann.label for cid, ann in cluster_annotations.items()
+        }
 
     # Final step: レポート出力
     with reporter_ui.step("レポートを生成") as step:

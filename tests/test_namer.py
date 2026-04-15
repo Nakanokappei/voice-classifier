@@ -191,8 +191,8 @@ def test_cache_file_also_saves_json(tmp_path: Path) -> None:
     with patch.object(namer, "_make_client", return_value=fake_client):
         namer.generate_cluster_annotations(summaries, cache_dir=cache_dir, model="m")
 
-    pickle_path = cache_dir / "cluster_annotations_v2_m.pkl"
-    json_path = cache_dir / "cluster_annotations_v2_m.json"
+    pickle_path = cache_dir / "cluster_annotations_v3_m.pkl"
+    json_path = cache_dir / "cluster_annotations_v3_m.json"
     assert pickle_path.exists()
     assert json_path.exists()
 
@@ -202,6 +202,141 @@ def test_cache_file_also_saves_json(tmp_path: Path) -> None:
     with json_path.open() as f:
         json_cache = json.load(f)
     assert pkl_cache == json_cache
-    # 内容は label + summary を含む
     first = next(iter(json_cache.values()))
     assert "label" in first and "summary" in first
+
+
+# ---------------------------------------------------------------------------
+# Dataset context inference
+# ---------------------------------------------------------------------------
+
+
+class _ContextClient:
+    """infer_dataset_context 用モック. domain / granularity_hint を返す."""
+
+    def __init__(self, domain: str, hint: str) -> None:
+        self.domain = domain
+        self.hint = hint
+        self.chat = self
+        self.completions = self
+        self.call_count = 0
+
+    def create(self, **kwargs) -> _FakeChatResponse:
+        self.call_count += 1
+        payload = (
+            f'{{"domain": "{self.domain}", "granularity_hint": "{self.hint}"}}'
+        )
+        return _FakeChatResponse(
+            choices=[_FakeChoice(message=_FakeMessage(content=payload))]
+        )
+
+
+def test_infer_dataset_context_samples_and_parses(tmp_path: Path) -> None:
+    """入力テキストからサンプリングして LLM 推定結果を返す."""
+    texts = [
+        "修理依頼: 充電できない",
+        "配送遅延のクレーム",
+        "サイズ違いで返品希望",
+        "商品破損の報告",
+        "使い方が分からない",
+        "領収書の再発行依頼",
+    ]
+    client = _ContextClient(domain="家電修理受付", hint="症状別に分類")
+    with patch.object(namer, "_make_client", return_value=client):
+        context = namer.infer_dataset_context(texts, sample_size=3)
+
+    assert client.call_count == 1
+    assert context.domain == "家電修理受付"
+    assert context.granularity_hint == "症状別に分類"
+    assert len(context.sample_texts) == 3
+    # grounding_hint にドメインが埋め込まれている
+    hint = context.grounding_hint()
+    assert "家電修理受付" in hint and "症状別に分類" in hint
+
+
+def test_infer_dataset_context_empty_returns_fallback() -> None:
+    """空入力はAPI呼び出しせずフォールバックを返す."""
+    with patch.object(namer, "_make_client") as mock_client:
+        context = namer.infer_dataset_context([])
+    mock_client.assert_not_called()
+    assert context.domain == "不明"
+
+
+# ---------------------------------------------------------------------------
+# Duplicate resolution
+# ---------------------------------------------------------------------------
+
+
+class _DifferentiatingClient:
+    """差別化プロンプトを受け取ると一意なラベルを返すモック."""
+
+    def __init__(self) -> None:
+        self.chat = self
+        self.completions = self
+        self.call_count = 0
+        self._lock = threading.Lock()
+
+    def create(self, **kwargs) -> _FakeChatResponse:
+        with self._lock:
+            self.call_count += 1
+        # user メッセージに "クラスタ A" が含まれれば差別化問い合わせ
+        messages = kwargs.get("messages", [])
+        user = next((m["content"] for m in messages if m["role"] == "user"), "")
+        # user 内の "クラスタ A" 側の最初の文字を抽出
+        import re
+        m = re.search(r"クラスタ A.*?-\s*(\S+)", user, re.DOTALL)
+        marker = m.group(1)[:3] if m else f"X{self.call_count}"
+        payload = (
+            f'{{"label": "差別化された{marker}", "summary": "{marker}の詳細"}}'
+        )
+        return _FakeChatResponse(
+            choices=[_FakeChoice(message=_FakeMessage(content=payload))]
+        )
+
+
+def test_resolve_duplicates_keeps_larger_relabels_smaller() -> None:
+    """同じラベルを持つ場合、大きいクラスタは据え置き、小さいほうが再生成される."""
+    summaries = [
+        _make_summary(1, ["alpha1", "alpha2"]),  # 大
+        _make_summary(2, ["beta1"]),             # 小
+    ]
+    # size は ClusterSummary の size にあるが、test のために明示書き換え
+    summaries[0].size = 100
+    summaries[1].size = 10
+
+    annotations = {
+        1: namer.ClusterAnnotation(label="同名ラベル", summary="Aの要約"),
+        2: namer.ClusterAnnotation(label="同名ラベル", summary="Bの要約"),
+    }
+
+    client = _DifferentiatingClient()
+    with patch.object(namer, "_make_client", return_value=client):
+        resolved = namer.resolve_label_duplicates(
+            summaries=summaries, annotations=annotations,
+        )
+
+    # 大きい方（cid=1）は据え置き
+    assert resolved[1].label == "同名ラベル"
+    # 小さい方（cid=2）は再生成（差別化された... で始まる）
+    assert resolved[2].label.startswith("差別化された")
+    # 差別化は 1 回呼ばれる（重複が 1 組だけなので）
+    assert client.call_count == 1
+
+
+def test_resolve_duplicates_noop_when_all_unique() -> None:
+    """すべてユニークならAPIは呼ばれない."""
+    summaries = [
+        _make_summary(0, ["a"]),
+        _make_summary(1, ["b"]),
+    ]
+    annotations = {
+        0: namer.ClusterAnnotation(label="A", summary="A"),
+        1: namer.ClusterAnnotation(label="B", summary="B"),
+    }
+    with patch.object(namer, "_make_client") as mock_client:
+        resolved = namer.resolve_label_duplicates(
+            summaries=summaries, annotations=annotations,
+        )
+    mock_client.assert_not_called()
+    assert resolved[0].label == "A"
+    assert resolved[1].label == "B"
