@@ -169,11 +169,11 @@ def test_run_digest_as_prompt_block_contains_key_fields() -> None:
         dedup_converged=True,
     )
     block = digest.as_prompt_block()
-    # The target, algorithm, and numeric counts must appear literally so
-    # the LLM can quote them back accurately.
-    assert "Selected target: faq" in block
+    # The purpose, sorting method, and numeric counts must appear literally
+    # so the LLM can quote them back accurately.
+    assert "FAQ page creation" in block
     assert "hdbscan" in block
-    assert "Clusters: 2" in block
+    assert "Groups found: 2" in block
 
 
 # ---------------------------------------------------------------------------
@@ -213,8 +213,8 @@ def test_generate_run_advice_returns_markdown_from_mocked_client() -> None:
     user_prompt = next(
         m["content"] for m in client.prompts[0] if m["role"] == "user"
     )
-    assert "Selected target: faq" in user_prompt
-    assert "Clusters: 2" in user_prompt
+    assert "FAQ page creation" in user_prompt
+    assert "Groups found: 2" in user_prompt
 
 
 def test_generate_run_advice_strips_accidental_code_fence() -> None:

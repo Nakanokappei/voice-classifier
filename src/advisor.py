@@ -82,50 +82,72 @@ class RunDigest:
     dedup_converged: bool
 
     def as_prompt_block(self) -> str:
-        """Render the digest as a human-readable block for the LLM prompt."""
+        """Render the digest as a human-readable block for the LLM prompt.
+
+        Uses plain-language labels instead of data-science jargon so the
+        LLM is less likely to echo technical terms back into the advisory.
+        """
         lines: list[str] = []
-        lines.append(f"- Selected target: {self.target}")
+        target_label = {
+            "faq": "FAQ page creation",
+            "chatbot": "chatbot question-type design",
+            "insight": "exploratory analysis",
+        }.get(self.target, self.target)
+        lines.append(f"- Purpose of this analysis: {target_label}")
         lines.append(
-            f"- Algorithm: {self.algorithm} with params: {self.params_text}"
+            f"- Sorting method used: {self.algorithm} "
+            f"(settings: {self.params_text})"
         )
         lines.append(
-            f"- Clusters: {self.n_clusters}, "
-            f"Noise: {self.n_noise} "
-            f"({self.noise_ratio_pct:.1f}% of {self.total_rows} rows)"
+            f"- Groups found: {self.n_clusters}"
         )
         lines.append(
-            f"- Largest cluster covers {self.max_share_pct:.1f}% of rows"
+            f"- Uncategorised inquiries: {self.n_noise} "
+            f"({self.noise_ratio_pct:.1f}% of {self.total_rows:,} total)"
         )
-        lines.append(f"- Silhouette score (full data): {self.silhouette:.4f}")
         lines.append(
-            f"- Dataset domain: {self.dataset_domain}"
+            f"- Largest single group covers {self.max_share_pct:.1f}% of "
+            f"all inquiries"
+        )
+        lines.append(
+            f"- Separation quality score: {self.silhouette:.4f} "
+            f"(higher is better; above 0.25 is usable, above 0.40 is strong)"
+        )
+        lines.append(
+            f"- Business domain: {self.dataset_domain}"
             if self.dataset_domain
-            else "- Dataset domain: unknown"
+            else "- Business domain: unknown"
         )
         if self.dataset_hint:
-            lines.append(f"- Labelling hint used: {self.dataset_hint}")
+            lines.append(f"- Sorting guidance used: {self.dataset_hint}")
         lines.append(
-            f"- Duplicate-label resolution converged: "
-            f"{'yes' if self.dedup_converged else 'no'}"
+            f"- All group names are unique: "
+            f"{'yes' if self.dedup_converged else 'no — some groups share similar names'}"
         )
         if self.coverage_top_n:
             cov = ", ".join(
-                f"top {n}={pct:.1f}%"
+                f"top {n} groups = {pct:.1f}%"
                 for n, pct in self.coverage_top_n
             )
-            lines.append(f"- Cumulative coverage of TOTAL rows: {cov}")
+            lines.append(
+                f"- How many inquiries are covered by the largest groups "
+                f"(% of ALL inquiries): {cov}"
+            )
         if self.coverage_top_n_ex_noise:
             cov2 = ", ".join(
-                f"top {n}={pct:.1f}%"
+                f"top {n} groups = {pct:.1f}%"
                 for n, pct in self.coverage_top_n_ex_noise
             )
-            lines.append(f"- Cumulative coverage of CLUSTERED rows: {cov2}")
+            lines.append(
+                f"- How many inquiries are covered by the largest groups "
+                f"(% of CATEGORISED inquiries only): {cov2}"
+            )
         if self.top_cluster_labels:
             labels_block = "\n".join(
-                f"    - {label} ({size:,} rows)"
+                f"    - \"{label}\" ({size:,} inquiries)"
                 for label, size in self.top_cluster_labels
             )
-            lines.append("- Top clusters by size:")
+            lines.append("- Largest groups by volume:")
             lines.append(labels_block)
         return "\n".join(lines)
 
@@ -225,30 +247,58 @@ def generate_run_advice(
     client = _make_openai_client(api_key)
 
     system = (
-        "You are a senior data analyst reviewing a customer-voice "
-        "clustering run for the operations team. Write a concise advisory "
-        "note explaining what this specific result implies, in Markdown.\n\n"
-        "Audience: a product manager who will decide whether to use these "
-        "clusters for FAQ pages, chatbot intents, or exploratory insight. "
-        "They can read numbers but are not clustering experts.\n\n"
-        "Output requirements:\n"
-        "- Start with a level-2 heading '## Advisory'.\n"
-        "- Then four level-3 subsections in order:\n"
-        "  '### Verdict' (one paragraph, 2-3 sentences)\n"
-        "  '### How to use these clusters' (bullet list, 3-5 items)\n"
-        "  '### Caveats and things to watch' (bullet list)\n"
-        "  '### Recommended next steps' (numbered list of concrete actions)\n"
-        "- Use the EXACT target value and cluster counts from the digest.\n"
-        "- Quote cluster labels verbatim when you cite examples.\n"
-        "- Be specific and quantitative. Do not hedge with vague words "
-        "like 'consider' or 'might'; state the direction clearly.\n"
+        "You are summarising the results of an automated customer-voice "
+        "analysis for executive leadership. Write a clear advisory note "
+        "in Markdown.\n\n"
+        "## Audience\n\n"
+        "The readers are **non-technical senior executives** (e.g. a VP of "
+        "Customer Service, a board member) who make budget and staffing "
+        "decisions based on this report. They understand business numbers "
+        "(percentages, row counts) but have NO background in data science "
+        "or statistics. Assume they have never heard words like "
+        "'silhouette', 'clustering', 'algorithm', 'centroid', 'noise', "
+        "'HDBSCAN', 'KMeans', 'Leiden', 'embedding', 'vector', or "
+        "'dimensionality reduction'.\n\n"
+        "## Writing rules\n\n"
+        "1. **Absolute ban on jargon.** Never use the terms listed above "
+        "or any other data-science / machine-learning vocabulary. Replace "
+        "them with plain-language equivalents:\n"
+        "   - 'cluster' → 'group' or 'category'\n"
+        "   - 'noise / unassigned' → 'uncategorised inquiries'\n"
+        "   - 'silhouette score' → 'separation quality' or drop entirely\n"
+        "   - 'algorithm' → 'automatic sorting method'\n"
+        "   - 'intent' → 'question type' or 'inquiry pattern'\n"
+        "   - Explain percentages by saying what they mean in practice "
+        "(e.g. '22% of inquiries could not be sorted into any group — "
+        "roughly 1 in 5 messages').\n"
+        "2. Use short sentences. One idea per sentence.\n"
+        "3. Use concrete examples: quote actual group names from the "
+        "digest (in quotation marks) so readers can picture the content.\n"
+        "4. When you cite numbers, immediately follow with a plain "
+        "interpretation (e.g. '412 inquiries — about the same volume as "
+        "one agent handles in two weeks').\n"
+        "5. The tone should be that of a trusted advisor briefing the CEO "
+        "before a board meeting: direct, confident, no hedging, no "
+        "unnecessary caveats.\n\n"
+        "## Structure\n\n"
+        "- Start with a level-2 heading `## Analysis Summary`.\n"
+        "- Then four level-3 subsections in this order:\n"
+        "  `### Overall assessment` — one paragraph (2-3 sentences). "
+        "State whether this result is ready for operational use, and in "
+        "one line why or why not.\n"
+        "  `### What we can do with these results` — bullet list (3-5 "
+        "items). Each bullet is a concrete business action.\n"
+        "  `### Points that need attention` — bullet list. Each bullet "
+        "names a specific risk or gap and what to do about it.\n"
+        "  `### Recommended actions` — numbered list. Each item is a "
+        "specific action with a clear owner suggestion (e.g. 'the "
+        "customer-service team should…').\n"
+        "- Use the EXACT group counts and names from the digest.\n"
         "- Write in the same language as the dataset domain description. "
-        "If the domain description is Japanese, respond in Japanese; "
-        "otherwise respond in English.\n"
-        "- Do not suggest changing the algorithm unless the numbers clearly "
-        "warrant it (e.g. noise > 40% or max_share > 20%).\n"
-        "- Return ONLY Markdown — no code fences wrapping the whole answer, "
-        "no preamble, no trailing remarks."
+        "If the domain description is in Japanese, write the entire note "
+        "in Japanese; otherwise write in English.\n"
+        "- Return ONLY Markdown — no code fences wrapping the whole "
+        "answer, no preamble, no trailing remarks."
     )
 
     user = (
