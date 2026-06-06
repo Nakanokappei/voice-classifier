@@ -10,7 +10,7 @@
 
 Для CSV, строки которого содержат свободный текст клиента:
 
-1. Вычислить embedding для каждой уникальной строки с помощью модели OpenAI.
+1. Вычислить embedding для каждой уникальной строки с помощью модели Azure OpenAI.
 2. Перебрать конфигурации кластеризации (KMeans / HDBSCAN / Leiden) и
    выбрать лучшую по силуэтной мере (cosine).
 3. Извлечь ближайшие к центроиду каждой группы строки как первичных
@@ -30,7 +30,7 @@ python -m venv .venv
 source .venv/bin/activate           # Windows: .venv\Scripts\activate
 pip install -r requirements.txt
 
-cp .env.example .env                # затем отредактируйте .env и укажите OPENAI_API_KEY
+cp .env.example .env                # затем отредактируйте .env и укажите значения AZURE_OPENAI_*
 ```
 
 Необязательные бекенды (при отсутствии пропускаются автоматически):
@@ -122,15 +122,15 @@ data/output/20260416_012345/
 | `--column-labels A=x,B=y` | — | Метки для режима нескольких колонок |
 | `--output-dir PATH` | `data/output` | Корневой каталог вывода |
 | `--cache-dir PATH` | `cache` | Каталог кэша |
-| `--model NAME` | `text-embedding-3-small` | Модель embedding |
+| `--model NAME` | `$AZURE_OPENAI_EMBEDDING_DEPLOYMENT` | Embedding-деплоймент Azure OpenAI |
 | `--top-k N` | `5` | Сколько представителей на кластер |
 | `--min-clusters N` | `2` | Нижний предел K |
 | `--max-clusters N` | `20` | Верхний предел K |
 | `--target faq|chatbot|insight` | `faq` | Гранулярность по цели. `faq`=30-80 кластеров (FAQ), `chatbot`=50-150 (интенты), `insight`=максимум silhouette |
 | `--name-clusters` / `--no-name-clusters` | вкл. | Разметка LLM вкл/выкл |
-| `--name-model NAME` | `gpt-5.4-nano` | Чат-модель для разметки |
+| `--name-model NAME` | `$AZURE_OPENAI_NAMER_DEPLOYMENT` | Чат-деплоймент Azure OpenAI для разметки |
 | `--advise` / `--no-advise` | on | Советующее примечание LLM в начале `parameter_search.html` |
-| `--advisor-model NAME` | `gpt-5.4` | Чат-модель для советующего примечания (анализирует весь прогон) |
+| `--advisor-model NAME` | `$AZURE_OPENAI_ADVISOR_DEPLOYMENT` | Чат-деплоймент Azure OpenAI для советующего примечания (анализирует весь прогон) |
 | `--format md|html|both` | `md` | Формат `report.*` |
 | `--log-level LEVEL` | `INFO` | Подробность stderr |
 
@@ -140,9 +140,13 @@ data/output/20260416_012345/
 
 ### Переменные окружения (`.env`)
 
-- `OPENAI_API_KEY` (обязательно)
-- `OPENAI_EMBEDDING_MODEL` (необязательный override)
-- `OPENAI_REQUEST_TIMEOUT` (секунды, по умолчанию 60)
+- `AZURE_OPENAI_API_KEY` (обязательно)
+- `AZURE_OPENAI_ENDPOINT` (обязательно, напр. `https://<resource>.openai.azure.com`)
+- `AZURE_OPENAI_EMBEDDING_DEPLOYMENT` (обязательно)
+- `AZURE_OPENAI_NAMER_DEPLOYMENT` (обязательно)
+- `AZURE_OPENAI_ADVISOR_DEPLOYMENT` (обязательно)
+- `AZURE_OPENAI_API_VERSION` (необязательно, по умолчанию `2024-10-21`)
+- `AZURE_OPENAI_REQUEST_TIMEOUT` (секунды, по умолчанию 60)
 
 ### Кэш
 
@@ -157,7 +161,7 @@ data/output/20260416_012345/
 
 | Симптом | Решение |
 |---|---|
-| `OPENAI_API_KEY is not set` | Укажите ключ в `.env` или в переменной окружения. |
+| `AZURE_OPENAI_API_KEY is not set` | Укажите ключ в `.env` или в переменной окружения. |
 | `Column '...' not found` | CLI выводит доступные колонки — выберите нужную. |
 | `Column count mismatch on lines: ...` | Незакрытые кавычки или запятые в значениях без кавычек. |
 | Все кандидаты отброшены фильтром шума | Фильтр автоматически смягчается (с предупреждением). |
@@ -171,7 +175,7 @@ data/output/20260416_012345/
 
 - Исходные CSV могут содержать ПД. `data/input/` и `data/output/` входят в
   `.gitignore`.
-- Пайплайн отправляет текст в OpenAI Embeddings и, опционально, в
+- Пайплайн отправляет текст в Azure OpenAI Embeddings и, опционально, в
   Chat Completions. Маскируйте чувствительные данные локально заранее.
 - В `cache/` хранятся embeddings и метки/резюме, сгенерированные LLM.
   Обращайтесь с этим каталогом так же бережно, как с исходным CSV.

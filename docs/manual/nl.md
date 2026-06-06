@@ -10,7 +10,7 @@ een LLM en rapporten oplevert die zowel mensen- als machineleesbaar zijn.
 
 Gegeven een CSV met vrije tekst per klantregel:
 
-1. Bereken embeddings voor elke unieke rij met een OpenAI-model.
+1. Bereken embeddings voor elke unieke rij met een Azure OpenAI-model.
 2. Doorloop kandidaat-configuraties (KMeans / HDBSCAN / Leiden) en kies de
    beste op basis van cosine-silhouette.
 3. Selecteer de rijen dichtst bij het centroïde van elk cluster als ruwe
@@ -30,7 +30,7 @@ python -m venv .venv
 source .venv/bin/activate           # Windows: .venv\Scripts\activate
 pip install -r requirements.txt
 
-cp .env.example .env                # bewerk .env en vul OPENAI_API_KEY in
+cp .env.example .env                # bewerk .env en vul je AZURE_OPENAI_*-waarden in
 ```
 
 Optionele backends (worden automatisch overgeslagen als ze ontbreken):
@@ -123,15 +123,15 @@ data/output/20260416_012345/
 | `--column-labels A=x,B=y` | — | Labels voor multi-kolom-modus |
 | `--output-dir PATH` | `data/output` | Hoofdmap voor uitvoer |
 | `--cache-dir PATH` | `cache` | Cachemap |
-| `--model NAME` | `text-embedding-3-small` | Embedding-model |
+| `--model NAME` | `$AZURE_OPENAI_EMBEDDING_DEPLOYMENT` | Azure OpenAI embedding-deployment |
 | `--top-k N` | `5` | Representanten per cluster |
 | `--min-clusters N` | `2` | Ondergrens voor K |
 | `--max-clusters N` | `20` | Bovengrens voor K |
 | `--target faq|chatbot|insight` | `faq` | Granulariteit per use case. `faq`=30-80 clusters (FAQ), `chatbot`=50-150 (intents), `insight`=maximale silhouette |
 | `--name-clusters` / `--no-name-clusters` | aan | LLM-labelling aan/uit |
-| `--name-model NAME` | `gpt-5.4-nano` | Chat-model voor labelling |
+| `--name-model NAME` | `$AZURE_OPENAI_NAMER_DEPLOYMENT` | Azure OpenAI chat-deployment voor labelling |
 | `--advise` / `--no-advise` | on | LLM-adviesnotitie boven in `parameter_search.html` |
-| `--advisor-model NAME` | `gpt-5.4` | Chat-model voor de adviesnotitie (beschouwt de hele run) |
+| `--advisor-model NAME` | `$AZURE_OPENAI_ADVISOR_DEPLOYMENT` | Azure OpenAI chat-deployment voor de adviesnotitie (beschouwt de hele run) |
 | `--format md|html|both` | `md` | Formaat van `report.*` |
 | `--log-level LEVEL` | `INFO` | Verbositeit op stderr |
 
@@ -141,9 +141,13 @@ data/output/20260416_012345/
 
 ### Omgevingsvariabelen (`.env`)
 
-- `OPENAI_API_KEY` (verplicht)
-- `OPENAI_EMBEDDING_MODEL` (optionele override)
-- `OPENAI_REQUEST_TIMEOUT` (seconden, standaard 60)
+- `AZURE_OPENAI_API_KEY` (verplicht)
+- `AZURE_OPENAI_ENDPOINT` (verplicht, bijv. `https://<resource>.openai.azure.com`)
+- `AZURE_OPENAI_EMBEDDING_DEPLOYMENT` (verplicht)
+- `AZURE_OPENAI_NAMER_DEPLOYMENT` (verplicht)
+- `AZURE_OPENAI_ADVISOR_DEPLOYMENT` (verplicht)
+- `AZURE_OPENAI_API_VERSION` (optioneel, standaard `2024-10-21`)
+- `AZURE_OPENAI_REQUEST_TIMEOUT` (seconden, standaard 60)
 
 ### Cache
 
@@ -158,7 +162,7 @@ verwijder het bijbehorende `cache/embeddings_*.pkl` of
 
 | Symptoom | Oplossing |
 |---|---|
-| `OPENAI_API_KEY is not set` | Vul de sleutel in via `.env` of de omgeving. |
+| `AZURE_OPENAI_API_KEY is not set` | Vul de sleutel in via `.env` of de omgeving. |
 | `Column '...' not found` | De CLI toont beschikbare kolommen; kies er een. |
 | `Column count mismatch on lines: ...` | Niet-gesloten aanhalingstekens of komma's in ongecitaliseerde waarden. |
 | Alle kandidaten afgewezen door ruisfilter | Het filter wordt automatisch versoepeld (waarschuwing). |
@@ -172,7 +176,7 @@ verwijder het bijbehorende `cache/embeddings_*.pkl` of
 
 - Invoer-CSV's kunnen persoonsgegevens bevatten. `data/input/` en
   `data/output/` staan in `.gitignore`.
-- De pipeline stuurt tekst naar OpenAI Embeddings en (optioneel) Chat
+- De pipeline stuurt tekst naar Azure OpenAI Embeddings en (optioneel) Chat
   Completions. Maskeer gevoelige data lokaal voor verwerking.
 - De map `cache/` bevat embeddings en LLM-gegenereerde labels/samenvattingen.
   Behandel deze met dezelfde zorg als de oorspronkelijke CSV.

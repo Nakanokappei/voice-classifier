@@ -266,7 +266,7 @@ def build_run_digest(
 
 def generate_run_advice(
     digest: RunDigest,
-    model: str = DEFAULT_MODEL,   # "gpt-5.4"
+    model: str | None = None,   # resolves AZURE_OPENAI_ADVISOR_DEPLOYMENT
     api_key: str | None = None,
 ) -> str  # Markdown; empty string on failure
 ```
@@ -274,8 +274,9 @@ def generate_run_advice(
 **Rationale**
 
 - The advisor is a separate module from `namer` because it uses a stronger
-  model (default `gpt-5.4` vs. `gpt-5.4-nano`) and reasons over the whole
-  run rather than a single cluster.
+  deployment (`AZURE_OPENAI_ADVISOR_DEPLOYMENT` vs.
+  `AZURE_OPENAI_NAMER_DEPLOYMENT`) and reasons over the whole run rather than
+  a single cluster.
 - `build_run_digest` is pure data reduction. It can be tested without any
   network access, and `generate_run_advice` is the only function that
   performs API I/O.

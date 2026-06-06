@@ -10,7 +10,7 @@
 
 각 행에 고객의 자유 텍스트가 들어 있는 CSV를 받아서:
 
-1. OpenAI 임베딩 모델로 고유 행마다 임베딩을 계산합니다.
+1. Azure OpenAI 임베딩 모델로 고유 행마다 임베딩을 계산합니다.
 2. 후보 설정(KMeans / HDBSCAN / Leiden)을 스윕하여 cosine 실루엣 기준으로
    최적 설정을 선택합니다.
 3. 각 클러스터의 중심에 가장 가까운 행을 원본 대표로 추출합니다.
@@ -29,7 +29,7 @@ python -m venv .venv
 source .venv/bin/activate           # Windows: .venv\Scripts\activate
 pip install -r requirements.txt
 
-cp .env.example .env                # .env 를 열어 OPENAI_API_KEY 를 입력합니다
+cp .env.example .env                # .env 를 열어 AZURE_OPENAI_* 값을 입력합니다
 ```
 
 선택적 백엔드(없으면 자동으로 건너뜁니다):
@@ -122,15 +122,15 @@ data/output/20260416_012345/
 | `--column-labels A=x,B=y` | — | 복수 컬럼 모드에서의 프리픽스 레이블 |
 | `--output-dir PATH` | `data/output` | 출력 루트 디렉터리 |
 | `--cache-dir PATH` | `cache` | 캐시 디렉터리 |
-| `--model NAME` | `text-embedding-3-small` | 임베딩 모델 |
+| `--model NAME` | `$AZURE_OPENAI_EMBEDDING_DEPLOYMENT` | Azure OpenAI 임베딩 디플로이먼트 |
 | `--top-k N` | `5` | 클러스터별 대표 행 수 |
 | `--min-clusters N` | `2` | K 하한 |
 | `--max-clusters N` | `20` | K 상한 |
 | `--target faq|chatbot|insight` | `faq` | 용도별 세분화. `faq`=30-80 클러스터 (FAQ), `chatbot`=50-150 (인텐트), `insight`=silhouette 최대화 |
 | `--name-clusters` / `--no-name-clusters` | 사용 | LLM 레이블링 on/off |
-| `--name-model NAME` | `gpt-5.4-nano` | 레이블링용 챗 모델 |
+| `--name-model NAME` | `$AZURE_OPENAI_NAMER_DEPLOYMENT` | 레이블링용 Azure OpenAI 챗 디플로이먼트 |
 | `--advise` / `--no-advise` | on | `parameter_search.html` 상단에 LLM 조언 노트 추가 |
-| `--advisor-model NAME` | `gpt-5.4` | 조언 노트용 챗 모델 (실행 전체를 분석하므로 더 강력한 모델) |
+| `--advisor-model NAME` | `$AZURE_OPENAI_ADVISOR_DEPLOYMENT` | 조언 노트용 Azure OpenAI 챗 디플로이먼트 (실행 전체를 분석하므로 더 강력한 모델) |
 | `--format md|html|both` | `md` | `report.*` 형식 |
 | `--log-level LEVEL` | `INFO` | stderr 로그 수준 |
 
@@ -140,9 +140,13 @@ data/output/20260416_012345/
 
 ### 환경 변수 (`.env`)
 
-- `OPENAI_API_KEY` (필수)
-- `OPENAI_EMBEDDING_MODEL` (선택적 오버라이드)
-- `OPENAI_REQUEST_TIMEOUT` (초, 기본 60)
+- `AZURE_OPENAI_API_KEY` (필수)
+- `AZURE_OPENAI_ENDPOINT` (필수, 예 `https://<resource>.openai.azure.com`)
+- `AZURE_OPENAI_EMBEDDING_DEPLOYMENT` (필수)
+- `AZURE_OPENAI_NAMER_DEPLOYMENT` (필수)
+- `AZURE_OPENAI_ADVISOR_DEPLOYMENT` (필수)
+- `AZURE_OPENAI_API_VERSION` (선택, 기본 `2024-10-21`)
+- `AZURE_OPENAI_REQUEST_TIMEOUT` (초, 기본 60)
 
 ### 캐시
 
@@ -157,7 +161,7 @@ data/output/20260416_012345/
 
 | 증상 | 대처 |
 |---|---|
-| `OPENAI_API_KEY is not set` | `.env` 또는 환경 변수로 키를 설정합니다. |
+| `AZURE_OPENAI_API_KEY is not set` | `.env` 또는 환경 변수로 키를 설정합니다. |
 | `Column '...' not found` | CLI 가 사용 가능한 컬럼을 출력하므로 그 중에서 고릅니다. |
 | `Column count mismatch on lines: ...` | 닫히지 않은 인용 부호 또는 인용 없이 쉼표가 포함된 값일 수 있습니다. |
 | 모든 후보가 노이즈 비율 필터에서 탈락 | 자동으로 필터가 완화되며 경고가 출력됩니다. |
@@ -171,7 +175,7 @@ data/output/20260416_012345/
 
 - 입력 CSV 에는 개인정보가 포함될 수 있습니다. `data/input/` 와
   `data/output/` 는 `.gitignore` 에 포함되어 있습니다.
-- 파이프라인은 OpenAI Embeddings 와 (선택적으로) Chat Completions 에
+- 파이프라인은 Azure OpenAI Embeddings 와 (선택적으로) Chat Completions 에
   텍스트를 전송합니다. 민감한 데이터는 처리 전에 로컬에서 가려 주세요.
 - `cache/` 에는 임베딩과 LLM 이 생성한 레이블/요약이 저장됩니다.
   원본 CSV 와 같은 수준으로 관리하세요.

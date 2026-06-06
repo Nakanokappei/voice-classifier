@@ -33,9 +33,9 @@
 - Return a `pandas.DataFrame` (original columns + `_normalized_text`).
 
 ### `embedder.py`
-- Default to `text-embedding-3-small`.
+- Resolve the embedding deployment from `AZURE_OPENAI_EMBEDDING_DEPLOYMENT`.
 - **Cache required**: keyed by SHA-256 of the text, persisted to
-  `cache/embeddings_<model>.pkl`.
+  `cache/embeddings_<deployment>.pkl`.
 - Batch fetching (up to `BATCH_SIZE`) with parallel requests.
 - Returns `np.ndarray` with shape `(N, D)`.
 
@@ -63,8 +63,9 @@
 - Builds a compact `RunDigest` from the selected configuration, coverage
   stats (top-N cumulative share), top cluster labels, dataset domain, and
   whether dedup converged.
-- Calls a stronger chat model (default `gpt-5.4`) to produce a Markdown
-  advisory with four sections: Verdict, How to use these clusters, Caveats,
+- Calls a stronger chat deployment (`AZURE_OPENAI_ADVISOR_DEPLOYMENT`) to
+  produce a Markdown advisory with four sections: Verdict, How to use these
+  clusters, Caveats,
   Recommended next steps.
 - Reasons over the entire run, not a single cluster — which is why this
   module is separate from `namer.py` and uses a larger model.

@@ -10,7 +10,7 @@ grupo mediante un LLM y genera informes legibles y procesables.
 
 Dado un CSV cuyas filas contienen texto libre del cliente:
 
-1. Genera embeddings para cada fila única con un modelo de OpenAI.
+1. Genera embeddings para cada fila única con un modelo de Azure OpenAI.
 2. Barre configuraciones candidatas (KMeans / HDBSCAN / Leiden) y selecciona
    la mejor según la silueta coseno.
 3. Extrae las filas más cercanas al centroide de cada grupo como
@@ -31,7 +31,7 @@ python -m venv .venv
 source .venv/bin/activate           # Windows: .venv\Scripts\activate
 pip install -r requirements.txt
 
-cp .env.example .env                # edite .env y rellene OPENAI_API_KEY
+cp .env.example .env                # edite .env y rellene sus valores AZURE_OPENAI_*
 ```
 
 Backends opcionales (se omiten con seguridad si faltan):
@@ -123,15 +123,15 @@ data/output/20260416_012345/
 | `--column-labels A=x,B=y` | — | Etiquetas para columnas múltiples |
 | `--output-dir PATH` | `data/output` | Directorio raíz de salida |
 | `--cache-dir PATH` | `cache` | Directorio de caché |
-| `--model NAME` | `text-embedding-3-small` | Modelo de embeddings |
+| `--model NAME` | `$AZURE_OPENAI_EMBEDDING_DEPLOYMENT` | Deployment de embeddings de Azure OpenAI |
 | `--top-k N` | `5` | Representantes por cluster |
 | `--min-clusters N` | `2` | Cota inferior de K |
 | `--max-clusters N` | `20` | Cota superior de K |
 | `--target faq|chatbot|insight` | `faq` | Granularidad por caso de uso. `faq`=30-80 clusters (páginas FAQ), `chatbot`=50-150 (intenciones), `insight`=silhouette máxima |
 | `--name-clusters` / `--no-name-clusters` | on | Etiquetado LLM on/off |
-| `--name-model NAME` | `gpt-5.4-nano` | Modelo chat para etiquetado |
+| `--name-model NAME` | `$AZURE_OPENAI_NAMER_DEPLOYMENT` | Deployment de chat de Azure OpenAI para etiquetado |
 | `--advise` / `--no-advise` | on | Nota de asesoramiento LLM al inicio de `parameter_search.html` |
-| `--advisor-model NAME` | `gpt-5.4` | Modelo de chat para la nota de asesoramiento (razona sobre toda la ejecución) |
+| `--advisor-model NAME` | `$AZURE_OPENAI_ADVISOR_DEPLOYMENT` | Deployment de chat de Azure OpenAI para la nota de asesoramiento (razona sobre toda la ejecución) |
 | `--format md|html|both` | `md` | Formato de `report.*` |
 | `--log-level LEVEL` | `INFO` | Verbosidad en stderr |
 
@@ -141,9 +141,13 @@ data/output/20260416_012345/
 
 ### Variables de entorno (`.env`)
 
-- `OPENAI_API_KEY` (obligatoria)
-- `OPENAI_EMBEDDING_MODEL` (opcional)
-- `OPENAI_REQUEST_TIMEOUT` (segundos, 60 por defecto)
+- `AZURE_OPENAI_API_KEY` (obligatoria)
+- `AZURE_OPENAI_ENDPOINT` (obligatoria, p. ej. `https://<resource>.openai.azure.com`)
+- `AZURE_OPENAI_EMBEDDING_DEPLOYMENT` (obligatoria)
+- `AZURE_OPENAI_NAMER_DEPLOYMENT` (obligatoria)
+- `AZURE_OPENAI_ADVISOR_DEPLOYMENT` (obligatoria)
+- `AZURE_OPENAI_API_VERSION` (opcional, `2024-10-21` por defecto)
+- `AZURE_OPENAI_REQUEST_TIMEOUT` (segundos, 60 por defecto)
 
 ### Caché
 
@@ -158,7 +162,7 @@ elimine el archivo correspondiente en `cache/embeddings_*.pkl` o
 
 | Síntoma | Solución |
 |---|---|
-| `OPENAI_API_KEY is not set` | Defina la clave en `.env` o en el entorno. |
+| `AZURE_OPENAI_API_KEY is not set` | Defina la clave en `.env` o en el entorno. |
 | `Column '...' not found` | La CLI lista las columnas disponibles; use una. |
 | `Column count mismatch on lines: ...` | CSV con comillas sin cerrar o comas sueltas. |
 | Todos los candidatos rechazados por ruido | El filtro se relaja automáticamente con una advertencia. |
@@ -172,7 +176,7 @@ elimine el archivo correspondiente en `cache/embeddings_*.pkl` o
 
 - Los CSV de entrada pueden contener PII. `data/input/` y `data/output/` están
   en `.gitignore`.
-- El pipeline envía texto a OpenAI Embeddings y, opcionalmente, a Chat
+- El pipeline envía texto a Azure OpenAI Embeddings y, opcionalmente, a Chat
   Completions. Enmascare datos sensibles localmente antes de procesar.
 - La carpeta `cache/` almacena embeddings y etiquetas / resúmenes generados
   por el LLM. Trátela con el mismo cuidado que el CSV de origen.

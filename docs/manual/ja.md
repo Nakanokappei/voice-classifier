@@ -7,7 +7,7 @@ LLM で各クラスタにラベルと要約を付与してレポート出力す�
 
 ## 1. できること
 
-1. 各行の正規化テキストを OpenAI Embeddings でベクトル化
+1. 各行の正規化テキストを Azure OpenAI Embeddings でベクトル化
 2. KMeans / HDBSCAN / Leiden を自動スイープし、コサインシルエットで最適解を選択
 3. 各クラスタの重心付近の代表行を抽出
 4. LLM にデータセット全体の意味を推定させ、それをグラウンディングに各クラスタの
@@ -25,7 +25,7 @@ python -m venv .venv
 source .venv/bin/activate           # Windows: .venv\Scripts\activate
 pip install -r requirements.txt
 
-cp .env.example .env                # OPENAI_API_KEY を記入
+cp .env.example .env                # AZURE_OPENAI_* の値を記入
 ```
 
 任意のクラスタリングバックエンド（未インストールでも自動スキップ）:
@@ -120,15 +120,15 @@ data/output/20260416_012345/
 | `--column-labels A=x,B=y` | — | 複数列時のラベル変換 |
 | `--output-dir PATH` | `data/output` | 出力ディレクトリ |
 | `--cache-dir PATH` | `cache` | キャッシュ保存先 |
-| `--model NAME` | `text-embedding-3-small` | 埋め込みモデル |
+| `--model NAME` | `$AZURE_OPENAI_EMBEDDING_DEPLOYMENT` | Azure OpenAI 埋め込みデプロイメント |
 | `--top-k N` | `5` | `rep_*` に抽出する件数 |
 | `--min-clusters N` | `2` | K の下限 |
 | `--max-clusters N` | `20` | K の上限 |
 | `--target faq|chatbot|insight` | `faq` | 目的別の粒度最適化. `faq`=30〜80クラスタ（FAQページ向き）、`chatbot`=50〜150（意図分岐向き）、`insight`=シルエット最大（探索向き） |
 | `--name-clusters` / `--no-name-clusters` | ON | LLM ラベル生成の ON/OFF |
-| `--name-model NAME` | `gpt-5.4-nano` | ラベル生成用 Chat モデル |
+| `--name-model NAME` | `$AZURE_OPENAI_NAMER_DEPLOYMENT` | ラベル生成用の Azure OpenAI チャットデプロイメント |
 | `--advise` / `--no-advise` | on | `parameter_search.html` 冒頭に LLM 助言ノートを挿入 |
-| `--advisor-model NAME` | `gpt-5.4` | 助言ノート用のチャットモデル（実行全体を読み解くので強めのモデル） |
+| `--advisor-model NAME` | `$AZURE_OPENAI_ADVISOR_DEPLOYMENT` | 助言ノート用の Azure OpenAI チャットデプロイメント（実行全体を読み解くので強めのモデル） |
 | `--format md|html|both` | `md` | `report.*` の形式 |
 | `--log-level LEVEL` | `INFO` | stderr のログレベル |
 
@@ -138,9 +138,13 @@ data/output/20260416_012345/
 
 ### 環境変数（`.env`）
 
-- `OPENAI_API_KEY`（必須）
-- `OPENAI_EMBEDDING_MODEL`（任意上書き）
-- `OPENAI_REQUEST_TIMEOUT`（秒、既定 60）
+- `AZURE_OPENAI_API_KEY`（必須）
+- `AZURE_OPENAI_ENDPOINT`（必須、例 `https://<resource>.openai.azure.com`）
+- `AZURE_OPENAI_EMBEDDING_DEPLOYMENT`（必須）
+- `AZURE_OPENAI_NAMER_DEPLOYMENT`（必須）
+- `AZURE_OPENAI_ADVISOR_DEPLOYMENT`（必須）
+- `AZURE_OPENAI_API_VERSION`（任意、既定 `2024-10-21`）
+- `AZURE_OPENAI_REQUEST_TIMEOUT`（秒、既定 60）
 
 ### キャッシュ
 
@@ -154,7 +158,7 @@ data/output/20260416_012345/
 
 | 症状 | 対処 |
 |---|---|
-| `OPENAI_API_KEY is not set` | `.env` に記入、または環境変数に設定 |
+| `AZURE_OPENAI_API_KEY is not set` | `.env` に記入、または環境変数に設定 |
 | `Column '...' not found` | 表示される利用可能列から正しいものを選択 |
 | `Column count mismatch on lines: ...` | CSV の引用符閉じ忘れ・未クオート値にカンマを疑う |
 | すべての候補がノイズ率フィルタで除外 | データ構造が希薄。自動でフィルタが緩和される |
@@ -167,7 +171,7 @@ data/output/20260416_012345/
 ## 9. プライバシー上の注意
 
 - 入力 CSV は PII を含み得ます。`data/input/` / `data/output/` は `.gitignore` 済み。
-- 処理中に OpenAI Embeddings と（任意で）Chat Completions へテキストが送信されます。
+- 処理中に Azure OpenAI Embeddings と（任意で）Chat Completions へテキストが送信されます。
   センシティブなデータは事前にマスキング推奨。
 - `cache/` には埋め込みベクトルと LLM 生成のラベル・要約が保存されます。
   元 CSV と同レベルの取り扱いをしてください。

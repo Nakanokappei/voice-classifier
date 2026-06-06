@@ -10,7 +10,7 @@
 
 เมื่อรับไฟล์ CSV ที่แต่ละแถวมีข้อความอิสระของลูกค้า:
 
-1. คำนวณ embedding สำหรับแต่ละแถวที่ไม่ซ้ำ ด้วยโมเดลของ OpenAI
+1. คำนวณ embedding สำหรับแต่ละแถวที่ไม่ซ้ำ ด้วยโมเดลของ Azure OpenAI
 2. ไล่สำรวจการตั้งค่าผู้สมัคร (KMeans / HDBSCAN / Leiden) แล้วเลือกตัวที่ดีที่สุด
    ตาม cosine silhouette
 3. ดึงแถวที่ใกล้ centroid ของแต่ละกลุ่มมาเป็นตัวแทนดิบ
@@ -29,7 +29,7 @@ python -m venv .venv
 source .venv/bin/activate           # Windows: .venv\Scripts\activate
 pip install -r requirements.txt
 
-cp .env.example .env                # แก้ไข .env แล้วใส่ OPENAI_API_KEY
+cp .env.example .env                # แก้ไข .env แล้วใส่ค่า AZURE_OPENAI_* ของคุณ
 ```
 
 Backend เสริม (ถูกข้ามโดยปลอดภัยเมื่อไม่ได้ติดตั้ง):
@@ -121,15 +121,15 @@ data/output/20260416_012345/
 | `--column-labels A=x,B=y` | — | ป้ายกำกับในโหมดหลายคอลัมน์ |
 | `--output-dir PATH` | `data/output` | โฟลเดอร์รากของผลลัพธ์ |
 | `--cache-dir PATH` | `cache` | โฟลเดอร์แคช |
-| `--model NAME` | `text-embedding-3-small` | โมเดล embedding |
+| `--model NAME` | `$AZURE_OPENAI_EMBEDDING_DEPLOYMENT` | Deployment embedding ของ Azure OpenAI |
 | `--top-k N` | `5` | จำนวนตัวแทนต่อกลุ่ม |
 | `--min-clusters N` | `2` | ขอบล่างของ K |
 | `--max-clusters N` | `20` | ขอบบนของ K |
 | `--target faq|chatbot|insight` | `faq` | ความละเอียดตามการใช้งาน. `faq`=30-80 กลุ่ม (หน้า FAQ), `chatbot`=50-150 (intent), `insight`=silhouette สูงสุด |
 | `--name-clusters` / `--no-name-clusters` | เปิด | เปิด/ปิดการติดป้ายกำกับด้วย LLM |
-| `--name-model NAME` | `gpt-5.4-nano` | โมเดล chat สำหรับติดป้าย |
+| `--name-model NAME` | `$AZURE_OPENAI_NAMER_DEPLOYMENT` | Deployment chat ของ Azure OpenAI สำหรับติดป้าย |
 | `--advise` / `--no-advise` | on | คำแนะนำ LLM ที่ด้านบนของ `parameter_search.html` |
-| `--advisor-model NAME` | `gpt-5.4` | โมเดลแชทสำหรับคำแนะนำ (วิเคราะห์ทั้ง run) |
+| `--advisor-model NAME` | `$AZURE_OPENAI_ADVISOR_DEPLOYMENT` | Deployment chat ของ Azure OpenAI สำหรับคำแนะนำ (วิเคราะห์ทั้ง run) |
 | `--format md|html|both` | `md` | รูปแบบของ `report.*` |
 | `--log-level LEVEL` | `INFO` | ระดับรายละเอียดใน stderr |
 
@@ -139,9 +139,13 @@ data/output/20260416_012345/
 
 ### ตัวแปรสภาพแวดล้อม (`.env`)
 
-- `OPENAI_API_KEY` (จำเป็น)
-- `OPENAI_EMBEDDING_MODEL` (override ตามใจ)
-- `OPENAI_REQUEST_TIMEOUT` (วินาที ค่าเริ่มต้น 60)
+- `AZURE_OPENAI_API_KEY` (จำเป็น)
+- `AZURE_OPENAI_ENDPOINT` (จำเป็น เช่น `https://<resource>.openai.azure.com`)
+- `AZURE_OPENAI_EMBEDDING_DEPLOYMENT` (จำเป็น)
+- `AZURE_OPENAI_NAMER_DEPLOYMENT` (จำเป็น)
+- `AZURE_OPENAI_ADVISOR_DEPLOYMENT` (จำเป็น)
+- `AZURE_OPENAI_API_VERSION` (ตามใจ ค่าเริ่มต้น `2024-10-21`)
+- `AZURE_OPENAI_REQUEST_TIMEOUT` (วินาที ค่าเริ่มต้น 60)
 
 ### แคช
 
@@ -156,7 +160,7 @@ data/output/20260416_012345/
 
 | อาการ | วิธีแก้ |
 |---|---|
-| `OPENAI_API_KEY is not set` | กรอกคีย์ใน `.env` หรือในตัวแปรสภาพแวดล้อม |
+| `AZURE_OPENAI_API_KEY is not set` | กรอกคีย์ใน `.env` หรือในตัวแปรสภาพแวดล้อม |
 | `Column '...' not found` | CLI จะแสดงคอลัมน์ที่ใช้ได้; เลือกจากรายการนั้น |
 | `Column count mismatch on lines: ...` | อัญประกาศไม่ปิด หรือมีคอมมาในค่าที่ไม่ได้ใส่อัญประกาศ |
 | ตัวเลือกทั้งหมดถูกกรองด้วยอัตราส่วน noise | ตัวกรองจะผ่อนปรนเองพร้อมคำเตือน |
@@ -170,7 +174,7 @@ data/output/20260416_012345/
 
 - CSV ข้อมูลเข้าอาจมีข้อมูลส่วนบุคคล `data/input/` และ `data/output/`
   อยู่ใน `.gitignore` แล้ว
-- ไพพ์ไลน์ส่งข้อความไปยัง OpenAI Embeddings และ (ทางเลือก) Chat Completions
+- ไพพ์ไลน์ส่งข้อความไปยัง Azure OpenAI Embeddings และ (ทางเลือก) Chat Completions
   โปรดปิดบังข้อมูลอ่อนไหวในเครื่องก่อนประมวลผล
 - โฟลเดอร์ `cache/` เก็บ embedding และป้ายกำกับ/สรุปที่สร้างโดย LLM
   กรุณาดูแลระดับเดียวกับ CSV ต้นฉบับ

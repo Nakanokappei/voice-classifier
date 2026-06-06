@@ -78,9 +78,10 @@ workstation; it is **not** a server-side service.
 
 ### 4.2 Embedding (FR-EMB-*)
 
-- **FR-EMB-01**: Use OpenAI embedding models (default `text-embedding-3-small`).
+- **FR-EMB-01**: Use Azure OpenAI embedding deployments (resolved from
+  `AZURE_OPENAI_EMBEDDING_DEPLOYMENT`, overridable with `--model`).
 - **FR-EMB-02**: Cache results by SHA-256 of the normalised text, keyed per
-  model, in `cache/embeddings_<model>.pkl`.
+  deployment, in `cache/embeddings_<deployment>.pkl`.
 - **FR-EMB-03**: Serve cache hits without any API call; log the hit ratio.
 - **FR-EMB-04**: Issue API requests in parallel batches (default 8 workers ×
   100 texts/batch).
@@ -187,10 +188,10 @@ workstation; it is **not** a server-side service.
 
 - **NFR-SEC-01**: `.env`, `data/input/`, `data/output/`, `cache/` are
   git-ignored; no secrets or PII may be committed.
-- **NFR-SEC-02**: The only permitted outbound network call is to the OpenAI
-  API (embeddings + chat completions).
-- **NFR-SEC-03**: API keys are sourced from `OPENAI_API_KEY` env or `.env`,
-  never hard-coded, never echoed to logs or reports.
+- **NFR-SEC-02**: The only permitted outbound network call is to Azure
+  OpenAI (embeddings + chat completions).
+- **NFR-SEC-03**: API keys are sourced from `AZURE_OPENAI_API_KEY` env or
+  `.env`, never hard-coded, never echoed to logs or reports.
 
 ### 5.6 Maintainability
 

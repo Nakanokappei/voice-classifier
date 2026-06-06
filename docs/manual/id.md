@@ -11,7 +11,7 @@ terbaca mesin.
 
 Diberi CSV dengan baris berisi teks bebas pelanggan:
 
-1. Hitung embedding untuk setiap baris unik dengan model OpenAI.
+1. Hitung embedding untuk setiap baris unik dengan model Azure OpenAI.
 2. Lakukan sapuan konfigurasi kandidat (KMeans / HDBSCAN / Leiden) dan pilih
    yang terbaik berdasarkan silhouette cosine.
 3. Ekstrak baris terdekat ke pusat tiap klaster sebagai representasi mentah.
@@ -30,7 +30,7 @@ python -m venv .venv
 source .venv/bin/activate           # Windows: .venv\Scripts\activate
 pip install -r requirements.txt
 
-cp .env.example .env                # kemudian edit .env isi OPENAI_API_KEY
+cp .env.example .env                # kemudian edit .env isi nilai AZURE_OPENAI_* Anda
 ```
 
 Backend opsional (dilewati otomatis jika tidak ada):
@@ -123,15 +123,15 @@ data/output/20260416_012345/
 | `--column-labels A=x,B=y` | — | Label untuk mode multi-kolom |
 | `--output-dir PATH` | `data/output` | Direktori output utama |
 | `--cache-dir PATH` | `cache` | Direktori cache |
-| `--model NAME` | `text-embedding-3-small` | Model embedding |
+| `--model NAME` | `$AZURE_OPENAI_EMBEDDING_DEPLOYMENT` | Deployment embedding Azure OpenAI |
 | `--top-k N` | `5` | Baris representatif per klaster |
 | `--min-clusters N` | `2` | Batas bawah K |
 | `--max-clusters N` | `20` | Batas atas K |
 | `--target faq|chatbot|insight` | `faq` | Granularitas berdasarkan kasus pemakaian. `faq`=30-80 klaster (FAQ), `chatbot`=50-150 (intent), `insight`=silhouette maksimum |
 | `--name-clusters` / `--no-name-clusters` | on | Aktif/mati pelabelan LLM |
-| `--name-model NAME` | `gpt-5.4-nano` | Model chat untuk pelabelan |
+| `--name-model NAME` | `$AZURE_OPENAI_NAMER_DEPLOYMENT` | Deployment chat Azure OpenAI untuk pelabelan |
 | `--advise` / `--no-advise` | on | Catatan saran LLM di bagian atas `parameter_search.html` |
-| `--advisor-model NAME` | `gpt-5.4` | Model chat untuk catatan saran (menganalisis keseluruhan run) |
+| `--advisor-model NAME` | `$AZURE_OPENAI_ADVISOR_DEPLOYMENT` | Deployment chat Azure OpenAI untuk catatan saran (menganalisis keseluruhan run) |
 | `--format md|html|both` | `md` | Format `report.*` |
 | `--log-level LEVEL` | `INFO` | Verbositas stderr |
 
@@ -141,9 +141,13 @@ data/output/20260416_012345/
 
 ### Variabel lingkungan (`.env`)
 
-- `OPENAI_API_KEY` (wajib)
-- `OPENAI_EMBEDDING_MODEL` (override opsional)
-- `OPENAI_REQUEST_TIMEOUT` (detik, default 60)
+- `AZURE_OPENAI_API_KEY` (wajib)
+- `AZURE_OPENAI_ENDPOINT` (wajib, mis. `https://<resource>.openai.azure.com`)
+- `AZURE_OPENAI_EMBEDDING_DEPLOYMENT` (wajib)
+- `AZURE_OPENAI_NAMER_DEPLOYMENT` (wajib)
+- `AZURE_OPENAI_ADVISOR_DEPLOYMENT` (wajib)
+- `AZURE_OPENAI_API_VERSION` (opsional, default `2024-10-21`)
+- `AZURE_OPENAI_REQUEST_TIMEOUT` (detik, default 60)
 
 ### Cache
 
@@ -157,7 +161,7 @@ model = file cache berbeda. Untuk memaksa regenerasi, hapus
 
 | Gejala | Solusi |
 |---|---|
-| `OPENAI_API_KEY is not set` | Isi kunci di `.env` atau environment. |
+| `AZURE_OPENAI_API_KEY is not set` | Isi kunci di `.env` atau environment. |
 | `Column '...' not found` | CLI mencetak kolom tersedia; pilih salah satu. |
 | `Column count mismatch on lines: ...` | Tanda kutip belum ditutup atau koma di nilai tanpa kutip. |
 | Semua kandidat ditolak oleh filter noise | Filter otomatis dilonggarkan dengan peringatan. |
@@ -171,7 +175,7 @@ model = file cache berbeda. Untuk memaksa regenerasi, hapus
 
 - CSV masukan dapat berisi PII. `data/input/` dan `data/output/` sudah
   dalam `.gitignore`.
-- Pipeline mengirim teks ke OpenAI Embeddings dan (opsional) Chat Completions.
+- Pipeline mengirim teks ke Azure OpenAI Embeddings dan (opsional) Chat Completions.
   Sembunyikan data sensitif secara lokal sebelum memproses.
 - Folder `cache/` menyimpan embedding dan label/ringkasan hasil LLM.
   Perlakukan dengan standar perlindungan yang sama seperti CSV asli.

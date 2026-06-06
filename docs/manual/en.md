@@ -10,7 +10,7 @@ produces both human-readable and machine-readable reports.
 
 Given a CSV whose rows contain free-text customer utterances:
 
-1. Embed each unique row with an OpenAI embedding model.
+1. Embed each unique row with an Azure OpenAI embedding model.
 2. Sweep candidate clustering configurations (KMeans / HDBSCAN / Leiden) and
    pick the best one by cosine silhouette.
 3. Pull the rows closest to each cluster's centroid as raw representatives.
@@ -30,7 +30,7 @@ python -m venv .venv
 source .venv/bin/activate           # Windows: .venv\Scripts\activate
 pip install -r requirements.txt
 
-cp .env.example .env                # then edit .env to fill in OPENAI_API_KEY
+cp .env.example .env                # then edit .env to fill in your AZURE_OPENAI_* values
 ```
 
 Optional clustering backends (all tuner sweeps fall back gracefully when they
@@ -128,15 +128,15 @@ Your original data, plus a `cluster_id` column and, when available, a
 | `--column-labels A=x,B=y` | — | Labels for multi-column prefixes |
 | `--output-dir PATH` | `data/output` | Root output directory |
 | `--cache-dir PATH` | `cache` | Embedding cache directory |
-| `--model NAME` | `text-embedding-3-small` | OpenAI embedding model |
+| `--model NAME` | `$AZURE_OPENAI_EMBEDDING_DEPLOYMENT` | Azure OpenAI embedding deployment |
 | `--top-k N` | `5` | Rows per cluster in `rep_*` |
 | `--min-clusters N` | `2` | Lower bound for K |
 | `--max-clusters N` | `20` | Upper bound for K |
 | `--target faq|chatbot|insight` | `faq` | Downstream-use-case-driven granularity. `faq`=30-80 clusters, `chatbot`=50-150 intents, `insight`=maximise silhouette |
 | `--name-clusters` / `--no-name-clusters` | on | Toggle LLM labelling |
-| `--name-model NAME` | `gpt-5.4-nano` | Chat model for labelling |
+| `--name-model NAME` | `$AZURE_OPENAI_NAMER_DEPLOYMENT` | Azure OpenAI chat deployment for labelling |
 | `--advise` / `--no-advise` | on | Toggle LLM advisory note at the top of `parameter_search.html` |
-| `--advisor-model NAME` | `gpt-5.4` | Chat model for the advisory note (reasons over the whole run) |
+| `--advisor-model NAME` | `$AZURE_OPENAI_ADVISOR_DEPLOYMENT` | Azure OpenAI chat deployment for the advisory note (reasons over the whole run) |
 | `--format md|html|both` | `md` | Format for `report.*` |
 | `--log-level LEVEL` | `INFO` | stderr log verbosity |
 
@@ -146,9 +146,13 @@ Your original data, plus a `cluster_id` column and, when available, a
 
 ### Environment variables (`.env`)
 
-- `OPENAI_API_KEY` (required)
-- `OPENAI_EMBEDDING_MODEL` (optional override)
-- `OPENAI_REQUEST_TIMEOUT` (seconds, default 60)
+- `AZURE_OPENAI_API_KEY` (required)
+- `AZURE_OPENAI_ENDPOINT` (required, e.g. `https://<resource>.openai.azure.com`)
+- `AZURE_OPENAI_EMBEDDING_DEPLOYMENT` (required)
+- `AZURE_OPENAI_NAMER_DEPLOYMENT` (required)
+- `AZURE_OPENAI_ADVISOR_DEPLOYMENT` (required)
+- `AZURE_OPENAI_API_VERSION` (optional, default `2024-10-21`)
+- `AZURE_OPENAI_REQUEST_TIMEOUT` (seconds, default 60)
 
 ### Cache
 
@@ -162,7 +166,7 @@ relevant `cache/embeddings_*.pkl` or `cache/cluster_annotations_*.pkl` file.
 
 | Symptom | Fix |
 |---|---|
-| `OPENAI_API_KEY is not set` | Fill `.env` or export the env variable. |
+| `AZURE_OPENAI_API_KEY is not set` | Fill `.env` or export the env variable. |
 | `Column '...' not found` | The CLI prints the available columns — copy one of them. |
 | `Column count mismatch on lines: ...` | Your CSV has unclosed quotes or stray commas on those lines. |
 | All candidates filtered by noise ratio | Dataset may lack clear clusters. A warning will appear and the filter is auto-relaxed. |
@@ -175,7 +179,7 @@ relevant `cache/embeddings_*.pkl` or `cache/cluster_annotations_*.pkl` file.
 ## 9. Privacy notes
 
 - Input CSVs may contain PII. `data/input/` and `data/output/` are git-ignored.
-- The pipeline sends text to OpenAI Embeddings and (optionally) Chat
+- The pipeline sends text to Azure OpenAI Embeddings and (optionally) Chat
   Completions. Redact/mask locally if your data is sensitive.
 - The `cache/` directory stores raw embeddings plus LLM-generated labels and
   summaries. Treat it with the same care as the source CSV.

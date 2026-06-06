@@ -148,8 +148,9 @@ LLM keeps generating the same labels across several clusters. Options:
 
 - Check `clusters.csv` for the remaining duplicates; they are still useful
   but require human review.
-- Retry with a stronger / different model (`--name-model gpt-4o-mini` or
-  `gpt-5.4-mini`).
+- Retry with a stronger / different namer deployment (`--name-model
+  <deployment>`, or point `AZURE_OPENAI_NAMER_DEPLOYMENT` at a stronger
+  model's deployment).
 - Disable LLM labelling (`--no-name-clusters`) and annotate manually.
 
 ### 4.6 `hnswlib Illegal instruction` / Leiden skipped silently

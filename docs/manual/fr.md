@@ -10,7 +10,7 @@ cluster via un LLM et produit des rapports lisibles et automatisables.
 
 Pour un CSV dont les lignes contiennent du texte libre :
 
-1. Vectoriser chaque ligne unique avec un modèle d'embedding d'OpenAI.
+1. Vectoriser chaque ligne unique avec un modèle d'embedding d'Azure OpenAI.
 2. Balayer des configurations candidates (KMeans / HDBSCAN / Leiden) et
    sélectionner la meilleure selon la silhouette cosinus.
 3. Extraire les lignes les plus proches du centroïde de chaque cluster.
@@ -30,7 +30,7 @@ python -m venv .venv
 source .venv/bin/activate           # Windows : .venv\Scripts\activate
 pip install -r requirements.txt
 
-cp .env.example .env                # puis éditez .env pour renseigner OPENAI_API_KEY
+cp .env.example .env                # puis éditez .env pour renseigner vos valeurs AZURE_OPENAI_*
 ```
 
 Backends optionnels (ignorés automatiquement s'ils manquent) :
@@ -123,15 +123,15 @@ data/output/20260416_012345/
 | `--column-labels A=x,B=y` | — | Étiquettes pour le mode multi-colonnes |
 | `--output-dir PATH` | `data/output` | Répertoire racine de sortie |
 | `--cache-dir PATH` | `cache` | Répertoire de cache |
-| `--model NAME` | `text-embedding-3-small` | Modèle d'embedding |
+| `--model NAME` | `$AZURE_OPENAI_EMBEDDING_DEPLOYMENT` | Déploiement d'embedding Azure OpenAI |
 | `--top-k N` | `5` | Représentants par cluster |
 | `--min-clusters N` | `2` | Borne inférieure de K |
 | `--max-clusters N` | `20` | Borne supérieure de K |
 | `--target faq|chatbot|insight` | `faq` | Granularité selon l'usage. `faq`=30-80 clusters (FAQ), `chatbot`=50-150 (intentions), `insight`=silhouette maximale |
 | `--name-clusters` / `--no-name-clusters` | activé | Étiquetage LLM on/off |
-| `--name-model NAME` | `gpt-5.4-nano` | Modèle chat pour l'étiquetage |
+| `--name-model NAME` | `$AZURE_OPENAI_NAMER_DEPLOYMENT` | Déploiement chat Azure OpenAI pour l'étiquetage |
 | `--advise` / `--no-advise` | on | Note d'avis LLM en haut de `parameter_search.html` |
-| `--advisor-model NAME` | `gpt-5.4` | Modèle de chat pour la note d'avis (raisonne sur l'exécution entière) |
+| `--advisor-model NAME` | `$AZURE_OPENAI_ADVISOR_DEPLOYMENT` | Déploiement chat Azure OpenAI pour la note d'avis (raisonne sur l'exécution entière) |
 | `--format md|html|both` | `md` | Format de `report.*` |
 | `--log-level LEVEL` | `INFO` | Verbosité stderr |
 
@@ -141,9 +141,13 @@ data/output/20260416_012345/
 
 ### Variables d'environnement (`.env`)
 
-- `OPENAI_API_KEY` (obligatoire)
-- `OPENAI_EMBEDDING_MODEL` (override optionnel)
-- `OPENAI_REQUEST_TIMEOUT` (secondes, 60 par défaut)
+- `AZURE_OPENAI_API_KEY` (obligatoire)
+- `AZURE_OPENAI_ENDPOINT` (obligatoire, p. ex. `https://<resource>.openai.azure.com`)
+- `AZURE_OPENAI_EMBEDDING_DEPLOYMENT` (obligatoire)
+- `AZURE_OPENAI_NAMER_DEPLOYMENT` (obligatoire)
+- `AZURE_OPENAI_ADVISOR_DEPLOYMENT` (obligatoire)
+- `AZURE_OPENAI_API_VERSION` (optionnel, `2024-10-21` par défaut)
+- `AZURE_OPENAI_REQUEST_TIMEOUT` (secondes, 60 par défaut)
 
 ### Cache
 
@@ -158,7 +162,7 @@ forcer une régénération, supprimez le `cache/embeddings_*.pkl` ou
 
 | Symptôme | Solution |
 |---|---|
-| `OPENAI_API_KEY is not set` | Renseigner la clé dans `.env` ou l'environnement. |
+| `AZURE_OPENAI_API_KEY is not set` | Renseigner la clé dans `.env` ou l'environnement. |
 | `Column '...' not found` | La CLI liste les colonnes disponibles ; choisissez-en une. |
 | `Column count mismatch on lines: ...` | CSV avec guillemets non fermés ou virgules non protégées. |
 | Tous les candidats filtrés par ratio de bruit | Le filtre est automatiquement assoupli avec un avertissement. |
@@ -172,7 +176,7 @@ forcer une régénération, supprimez le `cache/embeddings_*.pkl` ou
 
 - Les CSV d'entrée peuvent contenir des données personnelles. `data/input/` et
   `data/output/` sont dans `.gitignore`.
-- Le pipeline envoie du texte à OpenAI Embeddings et (optionnellement)
+- Le pipeline envoie du texte à Azure OpenAI Embeddings et (optionnellement)
   Chat Completions. Masquez les données sensibles en local avant traitement.
 - Le dossier `cache/` stocke les embeddings et les étiquettes / résumés
   générés par LLM. Protégez-le au même niveau que le CSV source.

@@ -10,7 +10,7 @@ através de um LLM e produz relatórios legíveis por humanos e por máquinas.
 
 Dado um CSV cujas linhas contêm texto livre do cliente:
 
-1. Calcular embeddings para cada linha única com um modelo OpenAI.
+1. Calcular embeddings para cada linha única com um modelo Azure OpenAI.
 2. Percorrer configurações candidatas (KMeans / HDBSCAN / Leiden) e
    seleccionar a melhor segundo silhueta coseno.
 3. Extrair as linhas mais próximas do centróide de cada cluster como
@@ -30,7 +30,7 @@ python -m venv .venv
 source .venv/bin/activate           # Windows: .venv\Scripts\activate
 pip install -r requirements.txt
 
-cp .env.example .env                # edite .env e preencha OPENAI_API_KEY
+cp .env.example .env                # edite .env e preencha os seus valores AZURE_OPENAI_*
 ```
 
 Backends opcionais (ignorados com segurança se estiverem em falta):
@@ -123,15 +123,15 @@ data/output/20260416_012345/
 | `--column-labels A=x,B=y` | — | Etiquetas para modo multi-coluna |
 | `--output-dir PATH` | `data/output` | Directório raiz de saída |
 | `--cache-dir PATH` | `cache` | Directório de cache |
-| `--model NAME` | `text-embedding-3-small` | Modelo de embedding |
+| `--model NAME` | `$AZURE_OPENAI_EMBEDDING_DEPLOYMENT` | Deployment de embedding Azure OpenAI |
 | `--top-k N` | `5` | Representantes por cluster |
 | `--min-clusters N` | `2` | Limite inferior de K |
 | `--max-clusters N` | `20` | Limite superior de K |
 | `--target faq|chatbot|insight` | `faq` | Granularidade por caso de uso. `faq`=30-80 clusters (FAQ), `chatbot`=50-150 (intenções), `insight`=silhueta máxima |
 | `--name-clusters` / `--no-name-clusters` | ligado | Etiquetagem LLM on/off |
-| `--name-model NAME` | `gpt-5.4-nano` | Modelo chat para etiquetagem |
+| `--name-model NAME` | `$AZURE_OPENAI_NAMER_DEPLOYMENT` | Deployment chat Azure OpenAI para etiquetagem |
 | `--advise` / `--no-advise` | on | Nota consultiva LLM no topo de `parameter_search.html` |
-| `--advisor-model NAME` | `gpt-5.4` | Modelo de chat para a nota consultiva (analisa toda a execução) |
+| `--advisor-model NAME` | `$AZURE_OPENAI_ADVISOR_DEPLOYMENT` | Deployment chat Azure OpenAI para a nota consultiva (analisa toda a execução) |
 | `--format md|html|both` | `md` | Formato de `report.*` |
 | `--log-level LEVEL` | `INFO` | Verbosidade em stderr |
 
@@ -141,9 +141,13 @@ data/output/20260416_012345/
 
 ### Variáveis de ambiente (`.env`)
 
-- `OPENAI_API_KEY` (obrigatória)
-- `OPENAI_EMBEDDING_MODEL` (override opcional)
-- `OPENAI_REQUEST_TIMEOUT` (segundos, predefinição 60)
+- `AZURE_OPENAI_API_KEY` (obrigatória)
+- `AZURE_OPENAI_ENDPOINT` (obrigatória, p. ex. `https://<resource>.openai.azure.com`)
+- `AZURE_OPENAI_EMBEDDING_DEPLOYMENT` (obrigatória)
+- `AZURE_OPENAI_NAMER_DEPLOYMENT` (obrigatória)
+- `AZURE_OPENAI_ADVISOR_DEPLOYMENT` (obrigatória)
+- `AZURE_OPENAI_API_VERSION` (opcional, predefinição `2024-10-21`)
+- `AZURE_OPENAI_REQUEST_TIMEOUT` (segundos, predefinição 60)
 
 ### Cache
 
@@ -158,7 +162,7 @@ correspondente.
 
 | Sintoma | Solução |
 |---|---|
-| `OPENAI_API_KEY is not set` | Preencha a chave em `.env` ou no ambiente. |
+| `AZURE_OPENAI_API_KEY is not set` | Preencha a chave em `.env` ou no ambiente. |
 | `Column '...' not found` | A CLI lista as colunas disponíveis; escolha uma. |
 | `Column count mismatch on lines: ...` | Aspas não fechadas ou vírgulas em valores sem aspas. |
 | Todos os candidatos rejeitados pelo rácio de ruído | O filtro é relaxado automaticamente com aviso. |
@@ -172,7 +176,7 @@ correspondente.
 
 - Os CSVs de entrada podem conter dados pessoais. `data/input/` e
   `data/output/` estão em `.gitignore`.
-- O pipeline envia texto para OpenAI Embeddings e, opcionalmente, para
+- O pipeline envia texto para Azure OpenAI Embeddings e, opcionalmente, para
   Chat Completions. Mascare dados sensíveis localmente antes do processamento.
 - A pasta `cache/` guarda embeddings e etiquetas/resumos gerados por LLM.
   Trate-a com o mesmo cuidado do CSV original.

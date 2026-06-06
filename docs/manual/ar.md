@@ -12,7 +12,7 @@
 
 لملف CSV تحتوي صفوفه على نص حرّ من العملاء:
 
-1. حساب تمثيلات (embeddings) لكل صف فريد باستخدام نموذج OpenAI.
+1. حساب تمثيلات (embeddings) لكل صف فريد باستخدام نموذج Azure OpenAI.
 2. تجربة تكوينات للتجميع (KMeans / HDBSCAN / Leiden) واختيار الأفضل وفق
    مقياس silhouette القائم على cosine.
 3. استخراج أقرب الصفوف إلى مركز كل مجموعة بوصفها ممثلات أولية.
@@ -31,7 +31,7 @@ python -m venv .venv
 source .venv/bin/activate           # Windows: .venv\Scripts\activate
 pip install -r requirements.txt
 
-cp .env.example .env                # عدّل .env لإدخال OPENAI_API_KEY
+cp .env.example .env                # عدّل .env لإدخال قيم AZURE_OPENAI_* الخاصة بك
 ```
 
 خلفيات اختيارية (يجري تجاوزها تلقائيًا إن كانت مفقودة):
@@ -123,15 +123,15 @@ data/output/20260416_012345/
 | `--column-labels A=x,B=y` | — | تسميات لوضع الأعمدة المتعددة |
 | `--output-dir PATH` | `data/output` | مجلد الإخراج الجذر |
 | `--cache-dir PATH` | `cache` | مجلد الذاكرة المؤقتة |
-| `--model NAME` | `text-embedding-3-small` | نموذج التضمين |
+| `--model NAME` | `$AZURE_OPENAI_EMBEDDING_DEPLOYMENT` | نشر تضمين Azure OpenAI |
 | `--top-k N` | `5` | عدد الصفوف الممثِّلة لكل مجموعة |
 | `--min-clusters N` | `2` | الحد الأدنى لقيمة K |
 | `--max-clusters N` | `20` | الحد الأعلى لقيمة K |
 | `--target faq|chatbot|insight` | `faq` | تحديد الدقة حسب الاستخدام. `faq`=30-80 مجموعة (صفحات الأسئلة الشائعة)، `chatbot`=50-150 (نوايا)، `insight`=أعلى silhouette |
 | `--name-clusters` / `--no-name-clusters` | مفعَّل | تشغيل/إيقاف التسمية عبر LLM |
-| `--name-model NAME` | `gpt-5.4-nano` | نموذج الدردشة للتسمية |
+| `--name-model NAME` | `$AZURE_OPENAI_NAMER_DEPLOYMENT` | نشر دردشة Azure OpenAI للتسمية |
 | `--advise` / `--no-advise` | on | ملاحظة استشارية من LLM في أعلى `parameter_search.html` |
-| `--advisor-model NAME` | `gpt-5.4` | نموذج الدردشة للملاحظة الاستشارية (يحلل التشغيل بالكامل) |
+| `--advisor-model NAME` | `$AZURE_OPENAI_ADVISOR_DEPLOYMENT` | نشر دردشة Azure OpenAI للملاحظة الاستشارية (يحلل التشغيل بالكامل) |
 | `--format md|html|both` | `md` | صيغة `report.*` |
 | `--log-level LEVEL` | `INFO` | مستوى التفاصيل على stderr |
 
@@ -141,9 +141,13 @@ data/output/20260416_012345/
 
 ### متغيرات البيئة (`.env`)
 
-- `OPENAI_API_KEY` (إلزامي)
-- `OPENAI_EMBEDDING_MODEL` (تجاوز اختياري)
-- `OPENAI_REQUEST_TIMEOUT` (بالثواني، الافتراضي 60)
+- `AZURE_OPENAI_API_KEY` (إلزامي)
+- `AZURE_OPENAI_ENDPOINT` (إلزامي، مثل `https://<resource>.openai.azure.com`)
+- `AZURE_OPENAI_EMBEDDING_DEPLOYMENT` (إلزامي)
+- `AZURE_OPENAI_NAMER_DEPLOYMENT` (إلزامي)
+- `AZURE_OPENAI_ADVISOR_DEPLOYMENT` (إلزامي)
+- `AZURE_OPENAI_API_VERSION` (اختياري، الافتراضي `2024-10-21`)
+- `AZURE_OPENAI_REQUEST_TIMEOUT` (بالثواني، الافتراضي 60)
 
 ### الذاكرة المؤقتة
 
@@ -157,7 +161,7 @@ data/output/20260416_012345/
 
 | العَرَض | الحل |
 |---|---|
-| `OPENAI_API_KEY is not set` | ضع المفتاح في `.env` أو في متغير البيئة. |
+| `AZURE_OPENAI_API_KEY is not set` | ضع المفتاح في `.env` أو في متغير البيئة. |
 | `Column '...' not found` | تعرض الأداة الأعمدة المتوفرة؛ اختر منها. |
 | `Column count mismatch on lines: ...` | علامات اقتباس غير مغلقة أو فواصل داخل قيم غير مقتبسة. |
 | استُبعد كل المرشحين بسبب نسبة الضجيج | يتخفف الفلتر تلقائيًا مع تحذير. |
@@ -171,7 +175,7 @@ data/output/20260416_012345/
 
 - قد تحتوي ملفات CSV المُدخَلة على بيانات شخصية. المجلدان `data/input/` و
   `data/output/` مُدرَجان في `.gitignore`.
-- يُرسل الأنبوب النص إلى OpenAI Embeddings، واختياريًا إلى Chat Completions.
+- يُرسل الأنبوب النص إلى Azure OpenAI Embeddings، واختياريًا إلى Chat Completions.
   أخفِ البيانات الحساسة محليًا قبل المعالجة.
 - يحفظ `cache/` متجهات التضمين والتسميات/الملخصات المولَّدة. عامِلها بنفس
   مستوى الحماية التي تعامل بها ملف CSV الأصلي.

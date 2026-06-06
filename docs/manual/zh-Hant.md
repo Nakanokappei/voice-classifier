@@ -9,7 +9,7 @@
 
 給定一份每列含有客戶自由文本的 CSV：
 
-1. 以 OpenAI embedding 模型對每一列（去除重複後）進行向量化。
+1. 以 Azure OpenAI embedding 模型對每一列（去除重複後）進行向量化。
 2. 對 KMeans / HDBSCAN / Leiden 候選設定進行掃描，以 cosine silhouette 選出最佳。
 3. 擷取離每個群集中心最近的代表列作為原始範例。
 4. 請 LLM 依照事先推斷的「資料集脈絡」為每個群集生成簡短標籤與描述性摘要。
@@ -26,7 +26,7 @@ python -m venv .venv
 source .venv/bin/activate           # Windows: .venv\Scripts\activate
 pip install -r requirements.txt
 
-cp .env.example .env                # 編輯 .env 填入 OPENAI_API_KEY
+cp .env.example .env                # 編輯 .env 填入 AZURE_OPENAI_* 各項值
 ```
 
 選用後端（未安裝時會自動略過對應的掃描）：
@@ -116,15 +116,15 @@ data/output/20260416_012345/
 | `--column-labels A=x,B=y` | — | 多欄位標籤 |
 | `--output-dir PATH` | `data/output` | 輸出根目錄 |
 | `--cache-dir PATH` | `cache` | 快取目錄 |
-| `--model NAME` | `text-embedding-3-small` | Embedding 模型 |
+| `--model NAME` | `$AZURE_OPENAI_EMBEDDING_DEPLOYMENT` | Azure OpenAI embedding 部署 |
 | `--top-k N` | `5` | 每群集代表列的數量 |
 | `--min-clusters N` | `2` | K 下界 |
 | `--max-clusters N` | `20` | K 上界 |
 | `--target faq|chatbot|insight` | `faq` | 依用途的粒度. `faq`=30-80 分群（FAQ 頁面）, `chatbot`=50-150 (意圖), `insight`=最大化 silhouette |
 | `--name-clusters` / `--no-name-clusters` | 開 | LLM 標籤開關 |
-| `--name-model NAME` | `gpt-5.4-nano` | 標籤用 chat 模型 |
+| `--name-model NAME` | `$AZURE_OPENAI_NAMER_DEPLOYMENT` | 用於標籤的 Azure OpenAI chat 部署 |
 | `--advise` / `--no-advise` | on | 在 `parameter_search.html` 頂端插入 LLM 建議說明 |
-| `--advisor-model NAME` | `gpt-5.4` | 建議說明使用的聊天模型（對整次執行進行分析） |
+| `--advisor-model NAME` | `$AZURE_OPENAI_ADVISOR_DEPLOYMENT` | Azure OpenAI chat 部署，建議說明使用的聊天模型（對整次執行進行分析） |
 | `--format md|html|both` | `md` | `report.*` 格式 |
 | `--log-level LEVEL` | `INFO` | stderr 日誌等級 |
 
@@ -134,9 +134,13 @@ data/output/20260416_012345/
 
 ### 環境變數（`.env`）
 
-- `OPENAI_API_KEY`（必填）
-- `OPENAI_EMBEDDING_MODEL`（選填覆蓋）
-- `OPENAI_REQUEST_TIMEOUT`（秒，預設 60）
+- `AZURE_OPENAI_API_KEY`（必填）
+- `AZURE_OPENAI_ENDPOINT`（必填，例如 `https://<resource>.openai.azure.com`）
+- `AZURE_OPENAI_EMBEDDING_DEPLOYMENT`（必填）
+- `AZURE_OPENAI_NAMER_DEPLOYMENT`（必填）
+- `AZURE_OPENAI_ADVISOR_DEPLOYMENT`（必填）
+- `AZURE_OPENAI_API_VERSION`（選填，預設 `2024-10-21`）
+- `AZURE_OPENAI_REQUEST_TIMEOUT`（秒，預設 60）
 
 ### 快取
 
@@ -150,7 +154,7 @@ data/output/20260416_012345/
 
 | 症狀 | 解決方案 |
 |---|---|
-| `OPENAI_API_KEY is not set` | 在 `.env` 填入或以環境變數設定。 |
+| `AZURE_OPENAI_API_KEY is not set` | 在 `.env` 填入或以環境變數設定。 |
 | `Column '...' not found` | CLI 會列出可用欄位；請從中選擇。 |
 | `Column count mismatch on lines: ...` | 可能是 CSV 有未關閉的引號或欄位內未引號的逗號。 |
 | 所有候選都被雜訊比例過濾掉 | 系統會自動放寬並發出警告。 |
@@ -163,7 +167,7 @@ data/output/20260416_012345/
 ## 9. 隱私須知
 
 - 輸入 CSV 可能含有個資。`data/input/` 與 `data/output/` 已列入 `.gitignore`。
-- 本工具會將文字送至 OpenAI Embeddings 及（選用）Chat Completions。
+- 本工具會將文字送至 Azure OpenAI Embeddings 及（選用）Chat Completions。
   敏感資料請先在本機進行遮罩。
 - `cache/` 儲存 embedding 與 LLM 生成的標籤/摘要，請以與原始 CSV
   相同的標準保護。

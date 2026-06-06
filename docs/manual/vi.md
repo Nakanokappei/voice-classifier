@@ -10,7 +10,7 @@ xuất báo cáo ở định dạng dễ đọc cho người lẫn máy.
 
 Với file CSV mà mỗi dòng chứa văn bản tự do của khách hàng:
 
-1. Nhúng (embedding) từng dòng duy nhất bằng mô hình của OpenAI.
+1. Nhúng (embedding) từng dòng duy nhất bằng mô hình của Azure OpenAI.
 2. Quét các cấu hình ứng viên (KMeans / HDBSCAN / Leiden) và chọn cấu hình
    tốt nhất theo silhouette cosine.
 3. Lấy những dòng gần centroid của mỗi cụm nhất làm ứng viên thô.
@@ -29,7 +29,7 @@ python -m venv .venv
 source .venv/bin/activate           # Windows: .venv\Scripts\activate
 pip install -r requirements.txt
 
-cp .env.example .env                # sau đó mở .env và điền OPENAI_API_KEY
+cp .env.example .env                # sau đó mở .env và điền các giá trị AZURE_OPENAI_*
 ```
 
 Các backend tuỳ chọn (sẽ bị bỏ qua an toàn nếu thiếu):
@@ -122,15 +122,15 @@ data/output/20260416_012345/
 | `--column-labels A=x,B=y` | — | Nhãn cho chế độ nhiều cột |
 | `--output-dir PATH` | `data/output` | Thư mục gốc đầu ra |
 | `--cache-dir PATH` | `cache` | Thư mục cache |
-| `--model NAME` | `text-embedding-3-small` | Mô hình embedding |
+| `--model NAME` | `$AZURE_OPENAI_EMBEDDING_DEPLOYMENT` | Deployment embedding của Azure OpenAI |
 | `--top-k N` | `5` | Số đại diện mỗi cụm |
 | `--min-clusters N` | `2` | Biên dưới của K |
 | `--max-clusters N` | `20` | Biên trên của K |
 | `--target faq|chatbot|insight` | `faq` | Mức độ chi tiết theo ca dùng. `faq`=30-80 cụm (trang FAQ), `chatbot`=50-150 (intent), `insight`=tối đa silhouette |
 | `--name-clusters` / `--no-name-clusters` | bật | Bật/tắt gắn nhãn LLM |
-| `--name-model NAME` | `gpt-5.4-nano` | Mô hình chat để gắn nhãn |
+| `--name-model NAME` | `$AZURE_OPENAI_NAMER_DEPLOYMENT` | Deployment chat của Azure OpenAI để gắn nhãn |
 | `--advise` / `--no-advise` | on | Ghi chú tư vấn LLM ở đầu `parameter_search.html` |
-| `--advisor-model NAME` | `gpt-5.4` | Mô hình chat cho ghi chú tư vấn (phân tích toàn bộ lần chạy) |
+| `--advisor-model NAME` | `$AZURE_OPENAI_ADVISOR_DEPLOYMENT` | Deployment chat của Azure OpenAI cho ghi chú tư vấn (phân tích toàn bộ lần chạy) |
 | `--format md|html|both` | `md` | Định dạng `report.*` |
 | `--log-level LEVEL` | `INFO` | Mức độ chi tiết stderr |
 
@@ -140,9 +140,13 @@ data/output/20260416_012345/
 
 ### Biến môi trường (`.env`)
 
-- `OPENAI_API_KEY` (bắt buộc)
-- `OPENAI_EMBEDDING_MODEL` (override tuỳ chọn)
-- `OPENAI_REQUEST_TIMEOUT` (giây, mặc định 60)
+- `AZURE_OPENAI_API_KEY` (bắt buộc)
+- `AZURE_OPENAI_ENDPOINT` (bắt buộc, ví dụ `https://<resource>.openai.azure.com`)
+- `AZURE_OPENAI_EMBEDDING_DEPLOYMENT` (bắt buộc)
+- `AZURE_OPENAI_NAMER_DEPLOYMENT` (bắt buộc)
+- `AZURE_OPENAI_ADVISOR_DEPLOYMENT` (bắt buộc)
+- `AZURE_OPENAI_API_VERSION` (tuỳ chọn, mặc định `2024-10-21`)
+- `AZURE_OPENAI_REQUEST_TIMEOUT` (giây, mặc định 60)
 
 ### Cache
 
@@ -156,7 +160,7 @@ hoặc `cache/cluster_annotations_*.pkl` tương ứng.
 
 | Triệu chứng | Giải pháp |
 |---|---|
-| `OPENAI_API_KEY is not set` | Điền khoá vào `.env` hoặc biến môi trường. |
+| `AZURE_OPENAI_API_KEY is not set` | Điền khoá vào `.env` hoặc biến môi trường. |
 | `Column '...' not found` | CLI liệt kê các cột có sẵn; chọn một trong đó. |
 | `Column count mismatch on lines: ...` | Dấu ngoặc kép chưa đóng hoặc có dấu phẩy trong giá trị không trích dẫn. |
 | Tất cả ứng viên bị lọc do tỷ lệ nhiễu | Bộ lọc tự động nới lỏng kèm cảnh báo. |
@@ -170,7 +174,7 @@ hoặc `cache/cluster_annotations_*.pkl` tương ứng.
 
 - CSV đầu vào có thể chứa thông tin cá nhân. `data/input/` và `data/output/`
   đều nằm trong `.gitignore`.
-- Pipeline gửi văn bản tới OpenAI Embeddings và (tuỳ chọn) Chat Completions.
+- Pipeline gửi văn bản tới Azure OpenAI Embeddings và (tuỳ chọn) Chat Completions.
   Hãy che dữ liệu nhạy cảm trên máy cục bộ trước khi xử lý.
 - Thư mục `cache/` lưu embedding và nhãn/tóm tắt do LLM sinh ra. Hãy bảo vệ
   nó ở mức tương đương với CSV gốc.
