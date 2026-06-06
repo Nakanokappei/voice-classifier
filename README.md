@@ -8,7 +8,8 @@ and an insight report.
 
 ## Features
 
-- **Embeddings**: OpenAI `text-embedding-3-small` by default, with a local cache.
+- **Embeddings**: Azure OpenAI deployment of an embedding model (e.g.
+  `text-embedding-3-small`), with a local cache.
 - **Auto-tuning**: sweeps KMeans / HDBSCAN / Leiden and picks the best config
   by cosine silhouette.
 - **Representative text**: LLM summary of each cluster plus the raw
@@ -19,7 +20,7 @@ and an insight report.
 ## Requirements
 
 - Python 3.10+
-- An OpenAI API key
+- An Azure OpenAI Service resource with three chat/embedding deployments
 - Windows / macOS / Linux
 
 ## Setup
@@ -32,10 +33,19 @@ source .venv/bin/activate    # Windows: .venv\Scripts\activate
 # 2. Install dependencies
 pip install -r requirements.txt
 
-# 3. Configure the API key
+# 3. Configure Azure OpenAI credentials and deployments
 cp .env.example .env
-# Edit .env and fill in OPENAI_API_KEY
+# Edit .env and fill in:
+#   AZURE_OPENAI_API_KEY
+#   AZURE_OPENAI_ENDPOINT          (e.g. https://<resource>.openai.azure.com)
+#   AZURE_OPENAI_EMBEDDING_DEPLOYMENT
+#   AZURE_OPENAI_NAMER_DEPLOYMENT
+#   AZURE_OPENAI_ADVISOR_DEPLOYMENT
 ```
+
+> **Note**: cache files are keyed by deployment name. If you change the
+> embedding deployment to a model with a different vector dimension, clear
+> `cache/` first (`rm -rf cache/*`).
 
 > **Note (Windows)**: `hdbscan` sometimes needs a C compiler to build.
 > If the install fails, try `pip install hdbscan --only-binary=:all:`.
@@ -58,15 +68,15 @@ python src/pipeline.py \
 | `--column-labels` | optional | Comma-separated `column=label` pairs used as prefixes in multi-column mode. |
 | `--output-dir` | `data/output` | Root output directory |
 | `--cache-dir` | `cache` | Embedding cache directory |
-| `--model` / `--embedding-model` | `text-embedding-3-small` | Embedding model. Can be swapped for `text-embedding-3-large` etc. Cache is per-model. |
+| `--model` / `--embedding-model` | `$AZURE_OPENAI_EMBEDDING_DEPLOYMENT` | Azure OpenAI embedding deployment name. Cache is segregated per deployment. |
 | `--top-k` | `5` | Representative rows per cluster |
 | `--min-clusters` | `2` | Lower bound for K (KMeans) |
 | `--max-clusters` | `20` | Upper bound for K (KMeans) |
 | `--target` | `faq` | Downstream use case to optimise for. `faq` prefers 30-80 clusters (good for FAQ pages), `chatbot` targets 50-150 finer intents, `insight` maximises silhouette for exploratory analysis. |
 | `--name-clusters` / `--no-name-clusters` | **on** | LLM label + summary per cluster (default on). Flow: (1) infer dataset context from 5 samples → (2) grounded parallel label generation → (3) duplicate-label resolution (up to 3 passes). The summary is shown as "Representative text" in the report; raw near-centroid rows remain visible below as verification. Use `--no-name-clusters` to skip LLM calls. |
-| `--name-model` / `--llm-model` | `gpt-5.4-nano` | Chat model for cluster labelling. API differences across GPT-5 / o-series / GPT-4o / GPT-3.5 (e.g. `max_completion_tokens` vs `max_tokens`) are handled automatically. |
+| `--name-model` / `--llm-model` | `$AZURE_OPENAI_NAMER_DEPLOYMENT` | Azure OpenAI chat deployment for cluster labelling. Model-family differences across GPT-5 / o-series / GPT-4o / GPT-3.5 (e.g. `max_completion_tokens` vs `max_tokens`) are handled automatically. |
 | `--advise` / `--no-advise` | **on** | Generate an LLM advisory note summarising what the chosen configuration means for downstream use (FAQ / chatbot / insight). Inserted at the top of `parameter_search.html`. Requires `--name-clusters` so the advisor can cite real cluster labels. |
-| `--advisor-model` | `gpt-5.4` | Chat model used for the advisory note. Deliberately a stronger model than `--name-model` because the advisor reasons over the whole run, not a single cluster. |
+| `--advisor-model` | `$AZURE_OPENAI_ADVISOR_DEPLOYMENT` | Azure OpenAI chat deployment for the advisory note. Use a stronger model than `--name-model` because the advisor reasons over the whole run, not a single cluster. |
 | `--format` | `md` | Report format: `md` / `html` / `both` |
 
 ### Examples

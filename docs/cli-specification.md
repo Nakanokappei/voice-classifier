@@ -55,15 +55,15 @@ first candidate is auto-selected.
 | `--column-labels` | — | `col=label,...` map used as prefixes in multi-column mode. Labels default to the column name. |
 | `--output-dir` | `data/output` | Root output directory. A timestamped subdirectory is created inside it. |
 | `--cache-dir` | `cache` | Embedding + annotation cache directory. |
-| `--model` / `--embedding-model` | `text-embedding-3-small` | OpenAI embedding model. Cache is per-model. |
+| `--model` / `--embedding-model` | `$AZURE_OPENAI_EMBEDDING_DEPLOYMENT` | Azure OpenAI embedding deployment name. Cache is segregated per deployment. |
 | `--top-k` | `5` | Number of near-centroid representative rows per cluster. |
 | `--min-clusters` | `2` | Lower bound for K (KMeans sweep). |
 | `--max-clusters` | `20` | Upper bound for K. |
 | `--target` | `faq` | Which downstream use case the clustering should optimise for. `faq` prefers 30-80 clusters with max share ≤ 10%. `chatbot` targets 50-150 finer intents with share ≤ 7%. `insight` maximises silhouette with no cluster-count bias. |
 | `--name-clusters` / `--no-name-clusters` | on | Toggle LLM labelling + summarisation. |
-| `--name-model` / `--llm-model` | `gpt-5.4-nano` | OpenAI chat model used for labelling. API-spec differences across model families are absorbed automatically. |
+| `--name-model` / `--llm-model` | `$AZURE_OPENAI_NAMER_DEPLOYMENT` | Azure OpenAI chat deployment for labelling. Model-family differences (max_completion_tokens vs max_tokens, temperature restrictions) are absorbed automatically based on the deployment name. |
 | `--advise` / `--no-advise` | on | Toggle the LLM advisory note inserted at the top of `parameter_search.html`. No-op without `--name-clusters`. |
-| `--advisor-model` | `gpt-5.4` | OpenAI chat model used for the advisory note. A stronger model than `--name-model` because it reasons over the whole run. |
+| `--advisor-model` | `$AZURE_OPENAI_ADVISOR_DEPLOYMENT` | Azure OpenAI chat deployment for the advisory note. Use a stronger model than `--name-model` because it reasons over the whole run. |
 | `--format` | `md` | Report format for `report.*`. `parameter_search.html` is always emitted regardless. |
 | `--log-level` | `INFO` | stderr verbosity. `run.log` always captures INFO+. |
 
@@ -81,11 +81,17 @@ first candidate is auto-selected.
 
 | Variable | Required | Default | Purpose |
 |---|---|---|---|
-| `OPENAI_API_KEY` | yes | — | Authenticates every OpenAI API call. Loaded from `.env` via `python-dotenv`. |
-| `OPENAI_REQUEST_TIMEOUT` | no | `60` | Request timeout in seconds. |
+| `AZURE_OPENAI_API_KEY` | yes | — | Authenticates every Azure OpenAI API call. Loaded from `.env` via `python-dotenv`. |
+| `AZURE_OPENAI_ENDPOINT` | yes | — | Resource endpoint (e.g. `https://<resource>.openai.azure.com`). |
+| `AZURE_OPENAI_EMBEDDING_DEPLOYMENT` | yes | — | Deployment name used by the embedder. |
+| `AZURE_OPENAI_NAMER_DEPLOYMENT` | yes | — | Deployment name used by the namer (cluster labelling). |
+| `AZURE_OPENAI_ADVISOR_DEPLOYMENT` | yes (when `--advise`) | — | Deployment name used by the advisor; advisor is skipped when unset. |
+| `AZURE_OPENAI_API_VERSION` | no | `2024-10-21` | API version sent on every request. |
+| `AZURE_OPENAI_REQUEST_TIMEOUT` | no | `60` | Request timeout in seconds. |
+| `AZURE_OPENAI_NAMER_MODEL_FAMILY` | no | inferred from deployment name | Override the namer model family detection (one of `gpt-5`, `o1`, `o3`, `o4`). Affects `max_completion_tokens` / `temperature` handling. |
 
-Any other `OPENAI_*` variables passed through the environment are ignored by
-this tool.
+Any other `AZURE_OPENAI_*` variables passed through the environment are
+ignored by this tool.
 
 ---
 

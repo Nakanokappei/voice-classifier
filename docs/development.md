@@ -17,7 +17,7 @@ source .venv/bin/activate                     # Windows: .venv\Scripts\activate
 pip install -r requirements.txt
 pip install pytest ruff                       # dev extras
 
-cp .env.example .env                          # fill OPENAI_API_KEY for E2E runs
+cp .env.example .env                          # fill AZURE_OPENAI_* values for E2E runs
 ```
 
 Python 3.10+ is required. 3.12 is the preferred dev version (matches the

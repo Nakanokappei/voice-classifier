@@ -35,7 +35,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from openai import OpenAI
+from openai import AzureOpenAI
 from tqdm import tqdm
 
 from . import utils
@@ -43,14 +43,27 @@ from .clusterer import ClusterSummary, NOISE_LABEL
 
 logger = logging.getLogger(__name__)
 
-# OpenAI's recommendation: GPT-5.4 nano targets classification / data
-# extraction / ranking / sub-agent workloads where speed and cost matter.
-# Cluster labelling matches that profile exactly.
-DEFAULT_MODEL: str = "gpt-5.4-nano"
+DEFAULT_API_VERSION: str = "2024-10-21"
 
 MAX_CONCURRENCY: int = 8
 MAX_RETRIES: int = 4
 BACKOFF_BASE_SEC: float = 2.0
+
+
+def _default_deployment() -> str:
+    """Return the namer chat deployment name from the environment."""
+    return os.getenv("AZURE_OPENAI_NAMER_DEPLOYMENT", "")
+
+
+def _resolve_deployment(model: str | None) -> str:
+    """Resolve the deployment name, raising if neither argument nor env is set."""
+    deployment = model or _default_deployment()
+    if not deployment:
+        raise ValueError(
+            "Azure OpenAI namer deployment name is not set. "
+            "Pass --name-model or configure AZURE_OPENAI_NAMER_DEPLOYMENT."
+        )
+    return deployment
 
 # Upper bound on dedup iterations. Three passes catch the vast majority of cases.
 MAX_DEDUP_ITERATIONS: int = 3
@@ -63,26 +76,46 @@ DATASET_SAMPLE_SIZE: int = 5
 # Model-specific Chat Completions kwargs
 # ---------------------------------------------------------------------------
 #
-# OpenAI chat models differ in which parameters they accept:
+# Chat models differ in which parameters they accept:
 #   - GPT-5 series, o-series: require `max_completion_tokens`; `max_tokens` 400s
 #   - o-series (o1, o3): temperature is fixed; sending one is an error
 #   - GPT-4o / GPT-4 / GPT-3.5: legacy `max_tokens` works as before
 #
-# Rather than patching every call site when a new series ships, we centralise
-# the logic in `_build_chat_kwargs` and dispatch by model-name prefix.
+# On Azure OpenAI the caller passes a *deployment name* — which may or may not
+# include the underlying model family. We detect by substring and let users
+# override via AZURE_OPENAI_NAMER_MODEL_FAMILY when their deployment name does
+# not hint at the family.
+
+
+def _model_family(deployment: str) -> str:
+    """Return the model family for ``deployment``.
+
+    Order of precedence:
+        1. ``AZURE_OPENAI_NAMER_MODEL_FAMILY`` env var (explicit override).
+        2. Substring match against the deployment name (gpt-5 / o1 / o3 / o4).
+        3. Empty string (treat as a legacy chat model).
+    """
+    override = os.getenv("AZURE_OPENAI_NAMER_MODEL_FAMILY", "").strip().lower()
+    if override:
+        return override
+    name = deployment.lower()
+    for family in ("gpt-5", "o1", "o3", "o4"):
+        if family in name:
+            return family
+    return ""
 
 
 def _uses_max_completion_tokens(model: str) -> bool:
     """True when the model uses the new `max_completion_tokens` parameter name."""
-    prefixes = ("gpt-5", "o1", "o3", "o4")
-    return any(model.startswith(p) for p in prefixes)
+    family = _model_family(model)
+    return family in ("gpt-5", "o1", "o3", "o4")
 
 
 def _supports_custom_temperature(model: str) -> bool:
     """True when the model accepts an explicit temperature value."""
     # The o-series uses a fixed temperature; everything else is free.
-    reasoning_prefixes = ("o1", "o3", "o4")
-    return not any(model.startswith(p) for p in reasoning_prefixes)
+    family = _model_family(model)
+    return family not in ("o1", "o3", "o4")
 
 
 def _supports_json_mode(model: str) -> bool:
@@ -169,7 +202,7 @@ class DatasetContext:
 
 def infer_dataset_context(
     texts: list[str],
-    model: str = DEFAULT_MODEL,
+    model: str | None = None,
     sample_size: int = DATASET_SAMPLE_SIZE,
     seed: int = 42,
     api_key: str | None = None,
@@ -182,6 +215,8 @@ def infer_dataset_context(
             granularity_hint="label with concrete domain terms",
         )
 
+    deployment = _resolve_deployment(model)
+
     # Dedupe first so we don't over-sample repeated phrasings.
     unique_texts = list(dict.fromkeys(texts))
     rng = _numpy_rng(seed)
@@ -189,7 +224,7 @@ def infer_dataset_context(
     indices = rng.choice(len(unique_texts), size=n, replace=False)
     samples = [unique_texts[int(i)] for i in indices]
 
-    client = _make_openai_client(api_key)
+    client = _make_azure_client(api_key)
     bullets = "\n".join(f"- {_truncate_for_prompt(t)}" for t in samples)
     system = (
         "You analyse datasets to extract their business context. "
@@ -211,7 +246,7 @@ def infer_dataset_context(
     def _call_infer() -> str:
         response = client.chat.completions.create(
             **_build_chat_kwargs(
-                model=model,
+                model=deployment,
                 messages=[
                     {"role": "system", "content": system},
                     {"role": "user", "content": user},
@@ -257,7 +292,7 @@ def infer_dataset_context(
 def generate_cluster_annotations(
     summaries: list[ClusterSummary],
     cache_dir: Path | str,
-    model: str = DEFAULT_MODEL,
+    model: str | None = None,
     api_key: str | None = None,
     dataset_context: DatasetContext | None = None,
 ) -> dict[int, ClusterAnnotation]:
@@ -265,7 +300,8 @@ def generate_cluster_annotations(
     if not summaries:
         return {}
 
-    cache_path = _cache_path_for(Path(cache_dir), model)
+    deployment = _resolve_deployment(model)
+    cache_path = _cache_path_for(Path(cache_dir), deployment)
     cache: dict[str, dict[str, str]] = utils.load_pickle_cache(cache_path)
 
     # Cache key includes the grounding hint as salt: the same rep_texts can
@@ -287,9 +323,9 @@ def generate_cluster_annotations(
             "Annotation generation: %d via API (cache hits: %d)",
             len(pending), len(tasks) - len(pending),
         )
-        client = _make_openai_client(api_key)
+        client = _make_azure_client(api_key)
         new_annotations = _annotate_clusters_in_parallel(
-            client, pending, model, dataset_context
+            client, pending, deployment, dataset_context
         )
         cache.update(new_annotations)
         utils.save_pickle_cache(cache_path, cache, also_json=True)
@@ -351,7 +387,7 @@ def _assemble_annotations(
 def resolve_label_duplicates(
     summaries: list[ClusterSummary],
     annotations: dict[int, ClusterAnnotation],
-    model: str = DEFAULT_MODEL,
+    model: str | None = None,
     api_key: str | None = None,
     dataset_context: DatasetContext | None = None,
     max_iterations: int = MAX_DEDUP_ITERATIONS,
@@ -369,6 +405,7 @@ def resolve_label_duplicates(
     Returns:
         A new annotations dict with duplicates resolved. The input is not mutated.
     """
+    deployment = _resolve_deployment(model)
     size_by_cid = {s.cluster_id: s.size for s in summaries}
     reps_by_cid = {s.cluster_id: s.representative_texts for s in summaries}
     working = dict(annotations)  # shallow copy
@@ -393,9 +430,9 @@ def resolve_label_duplicates(
         if not tasks:
             break
 
-        client = _make_openai_client(api_key)
+        client = _make_azure_client(api_key)
         new_labels = _differentiate_labels_in_parallel(
-            client, tasks, model, dataset_context
+            client, tasks, deployment, dataset_context
         )
 
         for cid, (new_label, new_summary) in new_labels.items():
@@ -463,7 +500,7 @@ def _build_differentiation_tasks(
 def generate_cluster_names(
     summaries: list[ClusterSummary],
     cache_dir: Path | str,
-    model: str = DEFAULT_MODEL,
+    model: str | None = None,
     api_key: str | None = None,
 ) -> dict[int, str]:
     """Legacy wrapper: returns ``cluster_id -> label`` only."""
@@ -474,19 +511,32 @@ def generate_cluster_names(
 
 
 # ---------------------------------------------------------------------------
-# OpenAI client
+# Azure OpenAI client
 # ---------------------------------------------------------------------------
 
 
-def _make_openai_client(api_key: str | None) -> OpenAI:
-    """Build the OpenAI client."""
-    key = api_key or os.getenv("OPENAI_API_KEY")
+def _make_azure_client(api_key: str | None) -> AzureOpenAI:
+    """Build the Azure OpenAI client."""
+    key = api_key or os.getenv("AZURE_OPENAI_API_KEY")
     if not key:
         raise RuntimeError(
-            "OPENAI_API_KEY is not set. Configure it in .env or the environment."
+            "AZURE_OPENAI_API_KEY is not set. Configure it in .env or the environment."
         )
-    timeout = float(os.getenv("OPENAI_REQUEST_TIMEOUT", "60"))
-    return OpenAI(api_key=key, timeout=timeout)
+    endpoint = os.getenv("AZURE_OPENAI_ENDPOINT")
+    if not endpoint:
+        raise RuntimeError(
+            "AZURE_OPENAI_ENDPOINT is not set. "
+            "Configure it in .env or the environment "
+            "(e.g. https://<resource>.openai.azure.com)."
+        )
+    api_version = os.getenv("AZURE_OPENAI_API_VERSION", DEFAULT_API_VERSION)
+    timeout = float(os.getenv("AZURE_OPENAI_REQUEST_TIMEOUT", "60"))
+    return AzureOpenAI(
+        api_key=key,
+        azure_endpoint=endpoint,
+        api_version=api_version,
+        timeout=timeout,
+    )
 
 
 def _numpy_rng(seed: int):
@@ -527,7 +577,7 @@ def _build_annotation_system_prompt(context: DatasetContext | None) -> str:
 
 
 def _annotate_clusters_in_parallel(
-    client: OpenAI,
+    client: AzureOpenAI,
     pending: list[tuple[int, str, list[str]]],
     model: str,
     context: DatasetContext | None,
@@ -570,7 +620,7 @@ def _annotate_clusters_in_parallel(
 
 
 def _invoke_annotation_llm(
-    client: OpenAI,
+    client: AzureOpenAI,
     rep_texts: list[str],
     model: str,
     system_prompt: str,
@@ -612,7 +662,7 @@ def _invoke_annotation_llm(
 
 
 def _differentiate_labels_in_parallel(
-    client: OpenAI,
+    client: AzureOpenAI,
     tasks: list[tuple[int, list[str], int, list[str]]],
     model: str,
     context: DatasetContext | None,
@@ -656,7 +706,7 @@ def _differentiate_labels_in_parallel(
 
 
 def _invoke_differentiation_llm(
-    client: OpenAI,
+    client: AzureOpenAI,
     losing_reps: list[str],
     keeper_reps: list[str],
     model: str,

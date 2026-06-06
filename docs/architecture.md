@@ -145,7 +145,8 @@ class RunDigest:
 
 | Situation | Handling |
 |---|---|
-| `OPENAI_API_KEY` unset | `RuntimeError` at startup |
-| OpenAI API failure (rate limit, etc.) | Exponential backoff with N retries; then `raise` |
+| `AZURE_OPENAI_API_KEY` or `AZURE_OPENAI_ENDPOINT` unset | `RuntimeError` at startup |
+| Required `AZURE_OPENAI_*_DEPLOYMENT` unset | `ValueError` before any API call |
+| Azure OpenAI API failure (rate limit, etc.) | Exponential backoff with N retries; then `raise` |
 | Effective sample count < `min_clusters` | `ValueError` before tuning |
 | All noise | `clusterer` emits a noise-only report; score recorded as `nan` |

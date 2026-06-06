@@ -1,4 +1,4 @@
-"""OpenAI Embeddings retrieval with caching.
+"""Azure OpenAI Embeddings retrieval with caching.
 
 Responsibilities:
     - Fetch embeddings in parallel batches.
@@ -17,24 +17,29 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
 import numpy as np
-from openai import OpenAI
+from openai import AzureOpenAI
 from tqdm import tqdm
 
 from . import utils
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_MODEL: str = "text-embedding-3-small"
+DEFAULT_API_VERSION: str = "2024-10-21"
 BATCH_SIZE: int = 100              # Within OpenAI's recommended batch size.
 MAX_CONCURRENCY: int = 8           # Number of parallel batches. Scale with your tier.
 MAX_RETRIES: int = 5
 BACKOFF_BASE_SEC: float = 2.0
 
 
+def _default_deployment() -> str:
+    """Return the embedding deployment name from the environment."""
+    return os.getenv("AZURE_OPENAI_EMBEDDING_DEPLOYMENT", "")
+
+
 def get_embeddings(
     texts: list[str],
     cache_dir: Path | str,
-    model: str = DEFAULT_MODEL,
+    model: str | None = None,
     api_key: str | None = None,
 ) -> np.ndarray:
     """Return the embedding vectors for ``texts``, caching misses on disk.
@@ -42,19 +47,30 @@ def get_embeddings(
     Args:
         texts: normalised input texts (duplicates should already be collapsed).
         cache_dir: directory used to persist the embedding cache.
-        model: OpenAI embedding model name.
-        api_key: pass an API key explicitly; otherwise read from ``OPENAI_API_KEY``.
+        model: Azure OpenAI embedding deployment name. Defaults to
+            ``AZURE_OPENAI_EMBEDDING_DEPLOYMENT`` from the environment.
+        api_key: pass an API key explicitly; otherwise read from
+            ``AZURE_OPENAI_API_KEY``.
 
     Returns:
         ``ndarray`` with shape ``(len(texts), D)``, matching the input order.
 
     Raises:
-        RuntimeError: no API key is available, or retries were exhausted.
+        RuntimeError: required Azure credentials are missing, or retries were
+            exhausted.
+        ValueError: deployment name cannot be resolved.
     """
     if not texts:
         raise ValueError("Received an empty text list")
 
-    cache_path = _cache_path_for(Path(cache_dir), model)
+    deployment = model or _default_deployment()
+    if not deployment:
+        raise ValueError(
+            "Azure OpenAI embedding deployment name is not set. "
+            "Pass --model or configure AZURE_OPENAI_EMBEDDING_DEPLOYMENT."
+        )
+
+    cache_path = _cache_path_for(Path(cache_dir), deployment)
     cache: dict[str, np.ndarray] = utils.load_pickle_cache(cache_path)
 
     # Only ask the API about texts that aren't already cached.
@@ -66,8 +82,8 @@ def get_embeddings(
             len(missing_texts),
             len(texts) - len(missing_texts),
         )
-        client = _make_openai_client(api_key)
-        new_vectors = _embed_texts_in_parallel(client, missing_texts, model)
+        client = _make_azure_client(api_key)
+        new_vectors = _embed_texts_in_parallel(client, missing_texts, deployment)
         for text, vec in zip(missing_texts, new_vectors, strict=True):
             cache[utils.content_hash(text)] = vec
         utils.save_pickle_cache(cache_path, cache)
@@ -84,26 +100,40 @@ def get_embeddings(
 # ---------------------------------------------------------------------------
 
 
-def _make_openai_client(api_key: str | None) -> OpenAI:
-    """Instantiate an ``OpenAI`` client, honouring env / timeout settings."""
-    key = api_key or os.getenv("OPENAI_API_KEY")
+def _make_azure_client(api_key: str | None) -> AzureOpenAI:
+    """Instantiate an ``AzureOpenAI`` client, honouring env / timeout settings."""
+    key = api_key or os.getenv("AZURE_OPENAI_API_KEY")
     if not key:
         raise RuntimeError(
-            "OPENAI_API_KEY is not set. Configure it in .env or the environment."
+            "AZURE_OPENAI_API_KEY is not set. Configure it in .env or the environment."
         )
-    timeout = float(os.getenv("OPENAI_REQUEST_TIMEOUT", "60"))
-    return OpenAI(api_key=key, timeout=timeout)
+    endpoint = os.getenv("AZURE_OPENAI_ENDPOINT")
+    if not endpoint:
+        raise RuntimeError(
+            "AZURE_OPENAI_ENDPOINT is not set. "
+            "Configure it in .env or the environment "
+            "(e.g. https://<resource>.openai.azure.com)."
+        )
+    api_version = os.getenv("AZURE_OPENAI_API_VERSION", DEFAULT_API_VERSION)
+    timeout = float(os.getenv("AZURE_OPENAI_REQUEST_TIMEOUT", "60"))
+    return AzureOpenAI(
+        api_key=key,
+        azure_endpoint=endpoint,
+        api_version=api_version,
+        timeout=timeout,
+    )
 
 
 def _embed_texts_in_parallel(
-    client: OpenAI,
+    client: AzureOpenAI,
     texts: list[str],
     model: str,
 ) -> list[np.ndarray]:
     """Split ``texts`` into batches and fetch them concurrently.
 
-    The OpenAI client is thread-safe, so several batches can be in flight at
-    once. Results are reordered by starting index before being returned.
+    The Azure OpenAI client is thread-safe, so several batches can be in
+    flight at once. Results are reordered by starting index before being
+    returned.
     """
     batches: list[tuple[int, list[str]]] = [
         (start, texts[start : start + BATCH_SIZE])
@@ -132,7 +162,7 @@ def _embed_texts_in_parallel(
 
 
 def _embed_batch(
-    client: OpenAI, batch: list[str], model: str
+    client: AzureOpenAI, batch: list[str], model: str
 ) -> list[np.ndarray]:
     """Call ``embeddings.create`` for a single batch with retry/backoff."""
     def _call() -> list[np.ndarray]:

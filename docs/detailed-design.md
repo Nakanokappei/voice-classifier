@@ -12,7 +12,7 @@ Module-level internals. For the high-level overview see
 src/
 ├── pipeline.py     CLI entrypoint; orchestrates the whole run.
 ├── loader.py       Input CSV parsing, text normalisation, dedup, column pick.
-├── embedder.py     OpenAI Embeddings with on-disk cache + parallel batches.
+├── embedder.py     Azure OpenAI Embeddings with on-disk cache + parallel batches.
 ├── tuner.py        Clustering sweep (KMeans/HDBSCAN/Leiden) + winner refit.
 ├── clusterer.py    Representative row extraction (top-K near centroid).
 ├── namer.py        LLM cluster labelling + summarisation + dedup.
@@ -443,7 +443,7 @@ Only `pipeline.py` touches the handlers; modules just call `logger.info` /
 - **Sweep on a 1.5k subsample** (then refit on full data) caps the sweep at
   a constant cost irrespective of N.
 - **Parallel batched embeddings** (8 workers × 100 texts/batch) saturate
-  typical OpenAI tier-2 rate limits without hitting them.
+  typical Azure OpenAI Standard-tier rate limits without hitting them.
 - **LLM annotation parallelism** matches the same 8-worker budget.
 
 ---
@@ -451,9 +451,9 @@ Only `pipeline.py` touches the handlers; modules just call `logger.info` /
 ## 8. Extension points
 
 - **New clustering algorithm**: see §3.3.
-- **New embedding provider**: replace `embedder._make_openai_client` and
+- **New embedding provider**: replace `embedder._make_azure_client` and
   `_embed_batch`. Cache schema unchanged.
-- **New LLM provider**: replace `namer._make_openai_client` and
+- **New LLM provider**: replace `namer._make_azure_client` and
   `_build_chat_kwargs`. Cache schema unchanged when the grounding-salt
   contract is preserved.
 - **New output format**: add a helper under `reporter` and wire it through

@@ -98,11 +98,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--model",
         "--embedding-model",
         dest="model",
-        default=embedder.DEFAULT_MODEL,
+        default=None,
         help=(
-            f"OpenAI embedding model. Default: {embedder.DEFAULT_MODEL}. "
-            "Alternatives: text-embedding-3-large, text-embedding-ada-002. "
-            "Cache is segregated per model so switching is safe."
+            "Azure OpenAI embedding deployment name. Defaults to "
+            "AZURE_OPENAI_EMBEDDING_DEPLOYMENT from the environment. "
+            "Cache is segregated per deployment name so switching is safe."
         ),
     )
     parser.add_argument("--top-k", type=int, default=5, help="Representative texts per cluster")
@@ -136,12 +136,16 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--name-model",
         "--llm-model",
         dest="name_model",
-        default=namer.DEFAULT_MODEL,
+        default=None,
         help=(
-            f"OpenAI chat model used for cluster labelling. Default: "
-            f"{namer.DEFAULT_MODEL}. API-spec differences across GPT-5 / "
-            "o-series / GPT-4o / GPT-3.5 (e.g. max_completion_tokens vs "
-            "max_tokens, temperature restrictions) are absorbed automatically."
+            "Azure OpenAI chat deployment name used for cluster labelling. "
+            "Defaults to AZURE_OPENAI_NAMER_DEPLOYMENT from the environment. "
+            "Model-family differences across GPT-5 / o-series / GPT-4o / "
+            "GPT-3.5 (e.g. max_completion_tokens vs max_tokens, temperature "
+            "restrictions) are absorbed automatically based on the "
+            "deployment name; override the family with "
+            "AZURE_OPENAI_NAMER_MODEL_FAMILY when the deployment name does "
+            "not hint at it."
         ),
     )
     parser.add_argument(
@@ -166,12 +170,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "--advisor-model",
         dest="advisor_model",
-        default=advisor.DEFAULT_MODEL,
+        default=None,
         help=(
-            f"OpenAI chat model used for the advisory note. Default: "
-            f"{advisor.DEFAULT_MODEL}. This is deliberately a stronger "
-            "model than `--name-model` because the advisor reasons over "
-            "the whole run, not a single cluster."
+            "Azure OpenAI chat deployment name used for the advisory note. "
+            "Defaults to AZURE_OPENAI_ADVISOR_DEPLOYMENT from the "
+            "environment. Use a stronger model than `--name-model` because "
+            "the advisor reasons over the whole run, not a single cluster."
         ),
     )
     parser.add_argument(
@@ -185,6 +189,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 
 def run(args: argparse.Namespace) -> Path:
     """Run the pipeline and return the output directory."""
+    # Resolve Azure OpenAI deployment names from env vars when CLI flags
+    # are absent. Done before logging so progress lines show the real names.
+    args.model = args.model or embedder._default_deployment()
+    args.name_model = args.name_model or namer._default_deployment()
+    args.advisor_model = args.advisor_model or advisor._default_deployment()
+
     # Per-run output directory with a millisecond-unique timestamp.
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     run_dir = args.output_dir / timestamp

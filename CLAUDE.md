@@ -1,9 +1,10 @@
 # voice-classifier
 **Customer Voice Auto-Classification & Insight Report System**
 
-An analysis pipeline that vectorizes customer support interaction CSVs with OpenAI
-Embeddings, automatically picks the optimal clustering algorithm and parameters,
-and outputs per-cluster representative text and a summary report.
+An analysis pipeline that vectorizes customer support interaction CSVs with
+Azure OpenAI Embeddings, automatically picks the optimal clustering algorithm
+and parameters, and outputs per-cluster representative text and a summary
+report.
 
 ---
 
@@ -14,7 +15,7 @@ voice-classifier/
 ├── CLAUDE.md               ← this file (project rules for Claude)
 ├── README.md
 ├── requirements.txt
-├── .env.example            ← template for OPENAI_API_KEY (.env is gitignored)
+├── .env.example            ← template for AZURE_OPENAI_* env vars (.env is gitignored)
 │
 ├── data/
 │   ├── input/              ← place customer-supplied CSVs here (gitignored)
@@ -23,7 +24,7 @@ voice-classifier/
 ├── src/
 │   ├── pipeline.py         ← entrypoint; runs every step in order
 │   ├── loader.py           ← CSV reading, preprocessing, text column extraction
-│   ├── embedder.py         ← OpenAI Embeddings API calls and cache management
+│   ├── embedder.py         ← Azure OpenAI Embeddings API calls and cache management
 │   ├── tuner.py            ← parameter sweep and best-method auto-selection
 │   ├── clusterer.py        ← run clustering, extract representative texts
 │   ├── namer.py            ← LLM-based cluster labelling / summarisation
@@ -48,7 +49,7 @@ voice-classifier/
 
 | Purpose | Library |
 |---|---|
-| Embedding retrieval | `openai` (text-embedding-3-small by default) |
+| Embedding retrieval | `openai` SDK targeting Azure OpenAI Service (deployment-name driven) |
 | Clustering | `scikit-learn` (KMeans, DBSCAN), `hdbscan` |
 | Scoring | `scikit-learn` (silhouette_score, davies_bouldin_score) |
 | Data processing | `pandas`, `numpy` |
@@ -67,9 +68,9 @@ Python version: **3.10+**
 - **API keys live in `.env`.** Never embed secrets in source code or output files.
 - **Input CSVs may contain PII.** `data/input/` and `data/output/` are in
   `.gitignore`.
-- **Embeddings must be cached.** Hit the OpenAI API at most once per unique text;
-  persist results under `cache/` (`.pkl` or `.npy`).
-- **The only outbound network call is to the OpenAI API.** Do not send data to
+- **Embeddings must be cached.** Hit the Azure OpenAI API at most once per
+  unique text; persist results under `cache/` (`.pkl` or `.npy`).
+- **The only outbound network call is to Azure OpenAI.** Do not send data to
   any other cloud service.
 
 ---
@@ -118,7 +119,7 @@ Outputs are written under `data/output/YYYYMMDD_HHMMSS/`:
 ## Quick Start
 
 ```bash
-cp .env.example .env              # fill in OPENAI_API_KEY
+cp .env.example .env              # fill in AZURE_OPENAI_* credentials and deployment names
 pip install -r requirements.txt
 python src/pipeline.py --input data/input/sample.csv --text-col "response_body"
 ```

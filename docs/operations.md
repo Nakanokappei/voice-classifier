@@ -29,9 +29,14 @@ python -m venv .venv
 source .venv/bin/activate                   # Windows: .venv\Scripts\activate
 pip install -r requirements.txt
 
-# 2. Configure the API key
+# 2. Configure the Azure OpenAI credentials and deployment names
 cp .env.example .env
-# Edit .env and fill in OPENAI_API_KEY
+# Edit .env and fill in:
+#   AZURE_OPENAI_API_KEY
+#   AZURE_OPENAI_ENDPOINT
+#   AZURE_OPENAI_EMBEDDING_DEPLOYMENT
+#   AZURE_OPENAI_NAMER_DEPLOYMENT
+#   AZURE_OPENAI_ADVISOR_DEPLOYMENT
 
 # 3. Smoke test (no API call — mocked in tests)
 pytest -q
@@ -88,11 +93,20 @@ hit ratio at the start of the run.
 
 ## 4. Runbook — common issues
 
-### 4.1 `OPENAI_API_KEY is not set`
+### 4.1 `AZURE_OPENAI_API_KEY is not set` / `AZURE_OPENAI_ENDPOINT is not set`
 
-Confirm `.env` contains `OPENAI_API_KEY=sk-...`. If the tool is launched from
-a different directory, `python-dotenv` looks for `.env` from the current
-working directory upwards — run from the project root.
+Confirm `.env` contains both `AZURE_OPENAI_API_KEY=...` and
+`AZURE_OPENAI_ENDPOINT=https://<resource>.openai.azure.com`. If the tool is
+launched from a different directory, `python-dotenv` looks for `.env` from
+the current working directory upwards — run from the project root.
+
+### 4.1.1 `Azure OpenAI <stage> deployment name is not set`
+
+The pipeline expects three deployment names — embedding, namer, advisor —
+each as its own `AZURE_OPENAI_*_DEPLOYMENT` env var. Either populate all
+three in `.env`, or pass `--model` / `--name-model` / `--advisor-model` on
+the command line. Without `AZURE_OPENAI_ADVISOR_DEPLOYMENT` the advisor
+step is skipped silently.
 
 ### 4.2 `Column count mismatch on lines: 42, 57, 91`
 
@@ -152,13 +166,14 @@ pipeline still runs with KMeans + HDBSCAN.
 
 ### 4.7 `RuntimeError: embeddings: exhausted 5 retries`
 
-OpenAI returned rate limits or server errors through every retry. Options:
+Azure OpenAI returned rate limits or server errors through every retry.
+Options:
 
 - Wait a few minutes and rerun — the embedding cache will preserve partial
   progress so only the failed batches are retried.
 - Lower concurrency by temporarily editing `embedder.MAX_CONCURRENCY` (not a
   CLI flag today; consider exposing it if this recurs).
-- Check the OpenAI status page.
+- Check the Azure status page and the resource quota in the Azure portal.
 
 ### 4.8 Unexpected output / report looks wrong
 
@@ -193,7 +208,7 @@ There is no remote telemetry; every signal stays on the operator's machine.
 - CPU: PCA + KMeans + HDBSCAN on a PCA-reduced representation is cheap
   (seconds). Leiden adds ~O(N × k) for the k-NN graph, still sub-minute.
 
-### 6.2 OpenAI spend
+### 6.2 Azure OpenAI spend
 
 Ballpark (prices at time of writing; verify in the vendor console):
 

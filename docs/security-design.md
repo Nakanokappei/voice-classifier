@@ -1,8 +1,8 @@
 # Security Design
 
 Threat model and mitigations for voice-classifier. The tool handles
-potentially sensitive customer text, makes outbound calls to OpenAI, and
-produces shareable artefacts — each surface is considered below.
+potentially sensitive customer text, makes outbound calls to Azure OpenAI,
+and produces shareable artefacts — each surface is considered below.
 
 ---
 
@@ -15,7 +15,8 @@ produces shareable artefacts — each surface is considered below.
 | Embedding vectors | Medium (derived; still reversible enough to worry about) | `cache/embeddings_*.pkl` |
 | LLM-generated labels/summaries | Medium | `cache/cluster_annotations_*.{pkl,json}` |
 | Output reports (`data/output/...`) | High (echoes raw rows) | Local disk |
-| OpenAI API key | Critical | `.env`, env variable |
+| Azure OpenAI API key | Critical | `.env`, env variable |
+| Azure OpenAI endpoint URL | Low (not secret, but tenant-identifying) | `.env`, env variable |
 | Operator's workstation | Out of scope | — |
 
 ---
@@ -37,7 +38,7 @@ produces shareable artefacts — each surface is considered below.
 ### 2.2 Out of scope
 
 - Attacks against the operator's workstation (assumed trusted).
-- Attacks against the OpenAI service (we trust the vendor's perimeter).
+- Attacks against the Azure OpenAI service (we trust the vendor's perimeter).
 - Side-channel attacks (timing, power analysis).
 - Insider threats with access to `.env` or cache files.
 
@@ -47,13 +48,13 @@ produces shareable artefacts — each surface is considered below.
 
 ### 3.1 Credentials
 
-- `OPENAI_API_KEY` is loaded via `python-dotenv` from `.env`. The file is in
-  `.gitignore`.
+- `AZURE_OPENAI_API_KEY` and `AZURE_OPENAI_ENDPOINT` are loaded via
+  `python-dotenv` from `.env`. The file is in `.gitignore`.
 - The key is never logged: `openai` raises `RateLimitError` / `APIError`
   without embedding the key in messages; our retry wrapper logs only the
   exception and the backoff timer.
-- `_make_openai_client` raises if the key is missing; it does not fall back
-  to any default / placeholder.
+- `_make_azure_client` raises if the key or endpoint is missing; it does not
+  fall back to any default / placeholder.
 
 ### 3.2 PII handling
 
@@ -114,9 +115,9 @@ and a bad label causes no privileged action, so we accept this risk.
 
 ### 3.6 Outbound network
 
-- The pipeline imports `openai` and `dotenv` only.
+- The pipeline imports `openai` (Azure OpenAI client) and `dotenv` only.
 - No other HTTP client, no telemetry, no crash reporter.
-- `OPENAI_REQUEST_TIMEOUT` can be lowered to bound the time individual
+- `AZURE_OPENAI_REQUEST_TIMEOUT` can be lowered to bound the time individual
   requests can stall.
 
 When upgrading dependencies, run `pip-audit` or review release notes for any
@@ -142,8 +143,9 @@ new outbound calls.
 
 ### 4.3 Key rotation
 
-- Rotate the OpenAI key at least twice a year or immediately after any
-  suspected leak.
+- Rotate the Azure OpenAI key at least twice a year or immediately after any
+  suspected leak. Azure exposes two keys per resource; rotate one at a time
+  to avoid downtime.
 - Keys live in `.env`; no rotation tooling is provided. Update the file,
   restart any concurrent runs.
 
@@ -160,7 +162,7 @@ new outbound calls.
 
 For each non-trivial change:
 
-- [ ] No new outbound network call other than OpenAI.
+- [ ] No new outbound network call other than Azure OpenAI.
 - [ ] No new file written outside `data/output/<run>` or `cache/`.
 - [ ] No new log line that echoes raw row content.
 - [ ] Any new cache file uses `utils.save_pickle_cache` (atomic replace).
@@ -180,5 +182,5 @@ For each non-trivial change:
 - There is no in-file encryption of cached data. Disk-level encryption
   (FileVault, BitLocker, LUKS) is the recommended control.
 - We do not implement rate limiting beyond exponential backoff. A runaway
-  run could burn through OpenAI quota — monitor the provider dashboard if
-  you expect to process > 100k unique rows.
+  run could burn through Azure OpenAI quota — monitor the Azure portal usage
+  metrics if you expect to process > 100k unique rows.

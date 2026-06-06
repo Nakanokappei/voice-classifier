@@ -201,7 +201,7 @@ def test_generate_run_advice_returns_markdown_from_mocked_client() -> None:
         dedup_converged=True,
     )
 
-    with patch("src.advisor._make_openai_client", return_value=client):
+    with patch("src.advisor._make_azure_client", return_value=client):
         result = advisor.generate_run_advice(digest=digest, api_key="x")
 
     assert result.startswith("## Advisory")
@@ -233,7 +233,7 @@ def test_generate_run_advice_strips_accidental_code_fence() -> None:
         dedup_converged=True,
     )
 
-    with patch("src.advisor._make_openai_client", return_value=client):
+    with patch("src.advisor._make_azure_client", return_value=client):
         result = advisor.generate_run_advice(digest=digest, api_key="x")
 
     assert not result.startswith("```")
@@ -266,7 +266,7 @@ def test_generate_run_advice_returns_empty_string_on_retry_exhaustion() -> None:
         dedup_converged=True,
     )
 
-    with patch("src.advisor._make_openai_client", return_value=_AlwaysFails()):
+    with patch("src.advisor._make_azure_client", return_value=_AlwaysFails()):
         result = advisor.generate_run_advice(digest=digest, api_key="x")
 
     # Empty string means "no advisory section" — caller handles gracefully.

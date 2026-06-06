@@ -86,7 +86,7 @@ def test_all_cache_hit_skips_api(tmp_path: Path) -> None:
         pickle.dump(cache, f)
 
     fake_client = _CountingFakeClient(dim=dim)
-    with patch.object(embedder, "_make_openai_client", return_value=fake_client):
+    with patch.object(embedder, "_make_azure_client", return_value=fake_client):
         result = embedder.get_embeddings(texts, cache_dir=cache_dir, model=model)
 
     # API は呼ばれない
@@ -104,7 +104,7 @@ def test_all_cache_miss_calls_api_and_saves_cache(tmp_path: Path) -> None:
     cache_dir = tmp_path / "cache"
 
     fake_client = _CountingFakeClient(dim=6)
-    with patch.object(embedder, "_make_openai_client", return_value=fake_client):
+    with patch.object(embedder, "_make_azure_client", return_value=fake_client):
         result = embedder.get_embeddings(texts, cache_dir=cache_dir, model=model)
 
     # API が呼ばれて全件取得している
@@ -146,7 +146,7 @@ def test_partial_cache_only_queries_missing(tmp_path: Path) -> None:
         pickle.dump(initial, f)
 
     fake_client = _CountingFakeClient(dim=dim)
-    with patch.object(embedder, "_make_openai_client", return_value=fake_client):
+    with patch.object(embedder, "_make_azure_client", return_value=fake_client):
         result = embedder.get_embeddings(all_texts, cache_dir=cache_dir, model=model)
 
     # 送られたテキストは C, D のみ
@@ -168,7 +168,7 @@ def test_result_order_preserved_across_parallel_batches(tmp_path: Path) -> None:
     cache_dir = tmp_path / "cache"
     fake_client = _CountingFakeClient(dim=4)
 
-    with patch.object(embedder, "_make_openai_client", return_value=fake_client):
+    with patch.object(embedder, "_make_azure_client", return_value=fake_client):
         result = embedder.get_embeddings(texts, cache_dir=cache_dir, model=model)
 
     # 少なくとも 2 バッチ（並列動作時は順不同で完了しうる）
@@ -190,11 +190,12 @@ def test_empty_texts_raises(tmp_path: Path) -> None:
 
 
 def test_missing_api_key_raises(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """Missing OPENAI_API_KEY raises RuntimeError when no key is passed."""
-    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    """Missing AZURE_OPENAI_API_KEY raises RuntimeError when no key is passed."""
+    monkeypatch.delenv("AZURE_OPENAI_API_KEY", raising=False)
+    monkeypatch.setenv("AZURE_OPENAI_ENDPOINT", "https://example.openai.azure.com")
     # _make_client is not called when everything hits cache,
     # so use an empty cache to force the API call and then fail before it
-    with pytest.raises(RuntimeError, match="OPENAI_API_KEY"):
+    with pytest.raises(RuntimeError, match="AZURE_OPENAI_API_KEY"):
         embedder.get_embeddings(["x"], cache_dir=tmp_path, model="y")
 
 
@@ -207,7 +208,7 @@ def test_corrupted_cache_is_discarded(tmp_path: Path) -> None:
     cache_path.write_bytes(b"not a valid pickle")
 
     fake_client = _CountingFakeClient(dim=3)
-    with patch.object(embedder, "_make_openai_client", return_value=fake_client):
+    with patch.object(embedder, "_make_azure_client", return_value=fake_client):
         result = embedder.get_embeddings(["hello"], cache_dir=cache_dir, model=model)
 
     assert result.shape == (1, 3)
@@ -244,7 +245,7 @@ def test_rate_limit_triggers_retry(tmp_path: Path, monkeypatch: pytest.MonkeyPat
     # Shorten backoff to keep the test fast
     monkeypatch.setattr(embedder, "BACKOFF_BASE_SEC", 0.01)
 
-    with patch.object(embedder, "_make_openai_client", return_value=_FlakeyClient()):
+    with patch.object(embedder, "_make_azure_client", return_value=_FlakeyClient()):
         result = embedder.get_embeddings(
             ["a"], cache_dir=tmp_path / "cache", model="retry"
         )

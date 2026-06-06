@@ -1,8 +1,9 @@
 """LLM-based advisory note for the parameter-search report.
 
 After the tuner has selected a configuration and the namer has labelled the
-clusters, this module asks a stronger chat model (default ``gpt-5.4``) to
-interpret the result the way a senior analyst would:
+clusters, this module asks a stronger chat model (resolved from
+``AZURE_OPENAI_ADVISOR_DEPLOYMENT``) to interpret the result the way a senior
+analyst would:
 
     - Does the chosen configuration look sensible for the stated target?
     - How should the operator use the clusters downstream (FAQ pages,
@@ -30,7 +31,7 @@ import logging
 import os
 from dataclasses import dataclass
 
-from openai import OpenAI
+from openai import AzureOpenAI
 
 from . import utils
 from .clusterer import ClusterSummary, NOISE_LABEL
@@ -43,13 +44,15 @@ from .tuner import BestConfig
 
 logger = logging.getLogger(__name__)
 
-# Flagship chat model. GPT-5.4 handles cross-table reasoning and written
-# analysis well — a noticeable step up from the nano-class model used for
-# per-cluster labelling, where we only need a noun phrase.
-DEFAULT_MODEL: str = "gpt-5.4"
+DEFAULT_API_VERSION: str = "2024-10-21"
 
 MAX_RETRIES: int = 3
 BACKOFF_BASE_SEC: float = 2.0
+
+
+def _default_deployment() -> str:
+    """Return the advisor chat deployment name from the environment."""
+    return os.getenv("AZURE_OPENAI_ADVISOR_DEPLOYMENT", "")
 
 # Hard cap on the number of clusters we feed the advisor. Beyond this the
 # prompt grows without adding signal, and GPT-5.4 costs scale linearly.
@@ -236,7 +239,7 @@ def build_run_digest(
 
 def generate_run_advice(
     digest: RunDigest,
-    model: str = DEFAULT_MODEL,
+    model: str | None = None,
     api_key: str | None = None,
 ) -> str:
     """Ask the LLM to write a short Markdown advisory for the report.
@@ -244,7 +247,13 @@ def generate_run_advice(
     Returns an empty string on failure — the caller treats "no advisory" as
     a soft condition, not an error.
     """
-    client = _make_openai_client(api_key)
+    deployment = model or _default_deployment()
+    if not deployment:
+        logger.warning(
+            "AZURE_OPENAI_ADVISOR_DEPLOYMENT is not set; skipping advisor"
+        )
+        return ""
+    client = _make_azure_client(api_key)
 
     system = (
         "You are summarising the results of an automated customer-voice "
@@ -310,7 +319,7 @@ def generate_run_advice(
     def _call() -> str:
         response = client.chat.completions.create(
             **_build_chat_kwargs(
-                model=model,
+                model=deployment,
                 messages=[
                     {"role": "system", "content": system},
                     {"role": "user", "content": user},
@@ -347,15 +356,28 @@ def generate_run_advice(
 # ---------------------------------------------------------------------------
 
 
-def _make_openai_client(api_key: str | None) -> OpenAI:
-    """Build the OpenAI client (duplicated from namer to keep modules independent)."""
-    key = api_key or os.getenv("OPENAI_API_KEY")
+def _make_azure_client(api_key: str | None) -> AzureOpenAI:
+    """Build the Azure OpenAI client (duplicated from namer to keep modules independent)."""
+    key = api_key or os.getenv("AZURE_OPENAI_API_KEY")
     if not key:
         raise RuntimeError(
-            "OPENAI_API_KEY is not set. Configure it in .env or the environment."
+            "AZURE_OPENAI_API_KEY is not set. Configure it in .env or the environment."
         )
-    timeout = float(os.getenv("OPENAI_REQUEST_TIMEOUT", "60"))
-    return OpenAI(api_key=key, timeout=timeout)
+    endpoint = os.getenv("AZURE_OPENAI_ENDPOINT")
+    if not endpoint:
+        raise RuntimeError(
+            "AZURE_OPENAI_ENDPOINT is not set. "
+            "Configure it in .env or the environment "
+            "(e.g. https://<resource>.openai.azure.com)."
+        )
+    api_version = os.getenv("AZURE_OPENAI_API_VERSION", DEFAULT_API_VERSION)
+    timeout = float(os.getenv("AZURE_OPENAI_REQUEST_TIMEOUT", "60"))
+    return AzureOpenAI(
+        api_key=key,
+        azure_endpoint=endpoint,
+        api_version=api_version,
+        timeout=timeout,
+    )
 
 
 def _sanitise_markdown(raw: str) -> str:
