@@ -115,7 +115,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help=(
             "Which downstream use case the clustering should optimise for. "
             "'faq' (default) prefers 30-80 clusters with no single cluster "
-            "over 10% of data — good for FAQ pages and chatbot response "
+            "over 10%% of data — good for FAQ pages and chatbot response "
             "templates. 'chatbot' targets 50-150 finer intents. 'insight' "
             "maximises raw silhouette without any cluster-count bias — use "
             "for exploratory analysis."

@@ -199,7 +199,7 @@ def test_cache_file_also_saves_json(tmp_path: Path) -> None:
     import json
     with pickle_path.open("rb") as f:
         pkl_cache = pickle.load(f)
-    with json_path.open() as f:
+    with json_path.open(encoding="utf-8") as f:
         json_cache = json.load(f)
     assert pkl_cache == json_cache
     first = next(iter(json_cache.values()))
