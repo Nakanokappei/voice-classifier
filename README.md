@@ -118,6 +118,21 @@ Per run, a directory under `data/output/YYYYMMDD_HHMMSS/` is created:
 - [`docs/architecture.md`](docs/architecture.md) — module design and dataflow
 - [`docs/algorithm.md`](docs/algorithm.md) — tuning strategy and scoring
 - [`docs/data-format.md`](docs/data-format.md) — input CSV specification
+- [`docs/README.md`](docs/README.md) — full document index (design docs and
+  end-user manuals)
+
+### Step-by-step guides for non-technical users (Japanese)
+
+The `## Setup` section above assumes a developer. For an end user starting
+from nothing, these two walk through every click and command in order:
+
+1. [`docs/azure-setup-manual.md`](docs/azure-setup-manual.md) — create the
+   Azure subscription, the Azure OpenAI resource, and the embedding / chat
+   model deployments in the portal (with screenshots).
+2. [`セットアップ手順書.md`](セットアップ手順書.md) — install Python on a
+   Windows workstation, download this repo, write `.env`, run the pipeline,
+   and open the report. Copy-paste PowerShell blocks only; also distributed
+   as `セットアップ手順書.docx`.
 
 ## Testing
 

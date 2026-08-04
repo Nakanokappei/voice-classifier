@@ -21,6 +21,18 @@ Design documents and user materials for voice-classifier.
 
 ## For end users
 
+### Getting set up (Japanese, click-by-click)
+
+| Document | Purpose |
+|---|---|
+| [`azure-setup-manual.md`](azure-setup-manual.md) | Create the Azure subscription, the Azure OpenAI resource, and the model deployments in the portal. Screenshots live in [`images/azure-setup/`](images/azure-setup/) |
+| [`../セットアップ手順書.md`](../セットアップ手順書.md) | Install Python on a Windows workstation, fetch the repo, write `.env`, run the pipeline, open the report. Copy-paste PowerShell only; also distributed as `.docx` |
+
+Read them in that order — the setup guide's `.env` step needs the endpoint,
+key, and deployment names produced by the Azure manual.
+
+### Operating the tool
+
 | Language | Manual |
 |---|---|
 | English | [`manual/en.md`](manual/en.md) |
@@ -46,7 +58,10 @@ not machine-translated.
 
 ### Operator / analyst
 
-1. [`../README.md`](../README.md).
+1. [`azure-setup-manual.md`](azure-setup-manual.md), then
+   [`../セットアップ手順書.md`](../セットアップ手順書.md) — get Azure and the
+   workstation set up. (Skip to [`../README.md`](../README.md) instead if you
+   are comfortable on a command line.)
 2. [`manual/<your language>.md`](manual/).
 3. [`operations.md`](operations.md) — when something goes wrong.
 
