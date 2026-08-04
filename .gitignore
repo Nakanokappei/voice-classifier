@@ -33,3 +33,6 @@ Thumbs.db
 dist/
 build/
 *.whl
+# ...except the wheels we deliberately vendor for the offline Windows bundle
+# (hnswlib publishes no wheels, so it is built from source and checked in).
+!tools/vendor/*.whl
