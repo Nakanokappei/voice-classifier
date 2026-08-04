@@ -30,7 +30,9 @@ voice-classifier/
 │   ├── namer.py            ← LLM-based cluster labelling / summarisation
 │   ├── advisor.py          ← LLM advisory note over the whole run (stronger model)
 │   ├── reporter.py         ← generate reports (Markdown / HTML / CSV / JSON)
-│   └── progress.py         ← CLI progress display utilities
+│   ├── progress.py         ← CLI progress display utilities
+│   └── diagnose.py         ← support report for a customer whose run fails
+│                             (stdlib only — must work before deps install)
 │
 ├── cache/                  ← local cache for embedding vectors (gitignored)
 │
